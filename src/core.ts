@@ -494,9 +494,8 @@ export class Repo {
               const parts = filePath.split("/");
               if (
                 !filePath || filePath === "." || path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)
-                || filePath.includes("\0") || path.posix.normalize(filePath) !== filePath || parts.some(part =>
-                  !part || part === "." || part === ".." || ignored.has(part)
-                )
+                || filePath.includes("\0") || filePath.includes("\\") || path.posix.normalize(filePath) !== filePath
+                || parts.some(part => !part || part === "." || part === ".." || ignored.has(part))
               ) {
                 errors.push(`${relativePath}: invalid tree path ${JSON.stringify(filePath)}`);
                 valid = false;
@@ -507,7 +506,7 @@ export class Repo {
               }
               if (
                 filePath && filePath !== "." && !path.posix.isAbsolute(filePath) && !path.win32.isAbsolute(filePath)
-                && !filePath.includes("\0") && path.posix.normalize(filePath) === filePath
+                && !filePath.includes("\0") && !filePath.includes("\\") && path.posix.normalize(filePath) === filePath
                 && !parts.some(part => !part || part === "." || part === ".." || ignored.has(part))
               ) {
                 validPaths.add(filePath);

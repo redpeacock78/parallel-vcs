@@ -251,11 +251,11 @@ test("verifyがCAS objectの欠落参照を検出する", () => {
   }
 });
 
-test("verifyが絶対pathとNUL byteを含むTreeを終了せず拒否する", () => {
+test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを終了せず拒否する", () => {
   const d = mkdirTemp();
   try {
     ok(d, "init");
-    for (const invalidPath of ["/bad", "bad\0path"]) {
+    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside"]) {
       const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };
       const id = objectHash(tree);
       const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
