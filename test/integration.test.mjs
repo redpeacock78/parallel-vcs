@@ -41,6 +41,7 @@ const blobHash = (data) =>
   createHash("sha256").update(JSON.stringify({ kind: "blob", data: Buffer.from(data).toString("base64") })).digest(
     "hex",
   );
+const objectHash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 test("独立S0・Shot・任意Snapshot派生・過去地点の参照", () => {
   const d = mkdirTemp();
@@ -200,6 +201,60 @@ test("特殊なファイル名とCAS破損検出", () => {
     const cas = path.join(d, ".pvc", "objects", snap.id.slice(0, 2), snap.id.slice(2));
     writeFileSync(cas, "{\"kind\":\"snapshot\",\"corrupt\":true}");
     assert.equal(cmd(d, "show", "HEAD").code, 1);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyが正常なobject storeを受け入れ、hash破損を検出する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "file", "content");
+    ok(d, "shot", "file");
+    assert.match(ok(d, "verify"), /^Verified \d+ objects/);
+
+    const snapshot = JSON.parse(ok(d, "show", "HEAD"));
+    const treePath = path.join(d, ".pvc", "objects", snapshot.root.slice(0, 2), snapshot.root.slice(2));
+    writeFileSync(treePath, JSON.stringify({ kind: "tree", files: {} }));
+    const report = cmd(d, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /CAS hash mismatch/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyがCAS objectの欠落参照を検出する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const tree = { kind: "tree", files: { ghost: "f".repeat(64) } };
+    const id = objectHash(tree);
+    const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+    mkdirSync(path.dirname(objectPath), { recursive: true });
+    writeFileSync(objectPath, JSON.stringify(tree));
+
+    const report = cmd(d, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /referenced blob .* is missing or has the wrong type/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyがstateのHEAD参照を確認する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const statePath = path.join(d, ".pvc", "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.heads.main = "f".repeat(64);
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const report = cmd(d, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /state\.json head main: referenced snapshot .* is missing or has the wrong type/);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }

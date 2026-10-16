@@ -85,6 +85,9 @@ function same(a: Hash | undefined, b: Hash | undefined): boolean {
 function exists(file: string): boolean {
   return fs.existsSync(file);
 }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function lstatMaybe(file: string): fs.Stats | null {
   try {
     return fs.lstatSync(file);
@@ -397,6 +400,192 @@ export class Repo {
     const obj: ObjectValue = JSON.parse(bytes.toString("utf8"));
     if (!["blob", "tree", "snapshot"].includes(obj.kind)) throw new VcsError("不明なCASオブジェクト");
     return obj;
+  }
+  verify(): { objectCount: number; errors: string[] } {
+    const errors: string[] = [];
+    const objects = new Map<Hash, ObjectValue>();
+    const types = new Map<Hash, ObjectValue["kind"]>();
+    let objectCount = 0;
+    const objectDirectory = path.join(this.meta, "objects");
+    const directoryStat = lstatMaybe(objectDirectory);
+    if (!directoryStat || !directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+      errors.push(".pvc/objects: CAS object directory is missing or invalid");
+    } else {
+      for (const bucket of fs.readdirSync(objectDirectory, { withFileTypes: true })) {
+        const bucketPath = path.join(objectDirectory, bucket.name);
+        if (!bucket.isDirectory() || bucket.isSymbolicLink() || !/^[a-f0-9]{2}$/.test(bucket.name)) {
+          errors.push(`${path.relative(this.meta, bucketPath)}: invalid object bucket`);
+          continue;
+        }
+        for (const file of fs.readdirSync(bucketPath, { withFileTypes: true })) {
+          const filePath = path.join(bucketPath, file.name);
+          const relativePath = path.relative(this.meta, filePath).split(path.sep).join("/");
+          if (!file.isFile() || file.isSymbolicLink() || !/^[a-f0-9]{62}$/.test(file.name)) {
+            errors.push(`${relativePath}: invalid object entry`);
+            continue;
+          }
+          objectCount++;
+          const id = bucket.name + file.name;
+          let bytes: Buffer;
+          try {
+            bytes = fs.readFileSync(filePath);
+          } catch (error) {
+            errors.push(`${relativePath}: cannot read object (${String(error)})`);
+            continue;
+          }
+          if (hashBytes(bytes) !== id) {
+            errors.push(`${relativePath}: CAS hash mismatch`);
+            continue;
+          }
+          let value: unknown;
+          try {
+            value = JSON.parse(bytes.toString("utf8"));
+          } catch (error) {
+            errors.push(`${relativePath}: invalid JSON (${String(error)})`);
+            continue;
+          }
+          if (!isRecord(value) || !["blob", "tree", "snapshot"].includes(String(value.kind))) {
+            errors.push(`${relativePath}: unknown CAS object format`);
+            continue;
+          }
+
+          if (value.kind === "blob") {
+            if (
+              typeof value.data !== "string"
+              || Buffer.from(value.data, "base64").toString("base64") !== value.data
+            ) {
+              errors.push(`${relativePath}: invalid blob data`);
+              continue;
+            }
+            objects.set(id, value as unknown as BlobObject);
+            types.set(id, "blob");
+          } else if (value.kind === "tree") {
+            if (!isRecord(value.files)) {
+              errors.push(`${relativePath}: tree files must be an object`);
+              continue;
+            }
+            let valid = true;
+            const files = Object.keys(value.files);
+            for (const [filePath, blobId] of Object.entries(value.files)) {
+              const parts = filePath.split("/");
+              if (
+                !filePath || filePath === "." || path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)
+                || path.posix.normalize(filePath) !== filePath || parts.some(part =>
+                  !part || part === "." || part === ".." || ignored.has(part)
+                )
+              ) {
+                errors.push(`${relativePath}: invalid tree path ${JSON.stringify(filePath)}`);
+                valid = false;
+              }
+              if (typeof blobId !== "string" || !hexRe.test(blobId)) {
+                errors.push(`${relativePath}: invalid blob reference for ${JSON.stringify(filePath)}`);
+                valid = false;
+              }
+            }
+            for (const filePath of files) {
+              let parent = path.posix.dirname(filePath);
+              while (parent !== ".") {
+                if (Object.hasOwn(value.files, parent)) {
+                  errors.push(`${relativePath}: file/directory collision between ${parent} and ${filePath}`);
+                  valid = false;
+                }
+                parent = path.posix.dirname(parent);
+              }
+            }
+            if (!valid) continue;
+            objects.set(id, value as unknown as TreeObject);
+            types.set(id, "tree");
+          } else {
+            if (
+              typeof value.parallel !== "string" || !nameRe.test(value.parallel) || value.parallel.includes("@")
+              || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0
+              || typeof value.root !== "string" || !hexRe.test(value.root)
+              || !Array.isArray(value.parents) || value.parents.length > 2
+              || value.parents.some(parent => typeof parent !== "string" || !hexRe.test(parent))
+              || !(value.seed === null || (typeof value.seed === "string" && hexRe.test(value.seed)))
+              || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))
+            ) {
+              errors.push(`${relativePath}: invalid snapshot format`);
+              continue;
+            }
+            objects.set(id, value as unknown as Snapshot);
+            types.set(id, "snapshot");
+          }
+        }
+      }
+    }
+
+    const requireType = (id: string, type: ObjectValue["kind"], location: string): ObjectValue | undefined => {
+      if (types.get(id) !== type) {
+        errors.push(`${location}: referenced ${type} ${short(id)} is missing or has the wrong type`);
+        return undefined;
+      }
+      return objects.get(id);
+    };
+    for (const [id, object] of objects) {
+      if (object.kind === "tree") {
+        for (const [filePath, blobId] of Object.entries(object.files)) {
+          requireType(blobId, "blob", `tree ${short(id)} (${filePath})`);
+        }
+      } else if (object.kind === "snapshot") {
+        requireType(object.root, "tree", `snapshot ${short(id)} root`);
+        for (const [index, parentId] of object.parents.entries()) {
+          requireType(parentId, "snapshot", `snapshot ${short(id)} parent ${index + 1}`);
+        }
+        if (object.seed) requireType(object.seed, "snapshot", `snapshot ${short(id)} seed`);
+
+        if (!object.parents.length) {
+          if (object.seq !== 0) errors.push(`snapshot ${short(id)}: parentless snapshot must have seq 0`);
+          if (object.seed) {
+            const seed = objects.get(object.seed);
+            if (seed?.kind === "snapshot" && seed.root !== object.root) {
+              errors.push(`snapshot ${short(id)}: seed and snapshot trees differ`);
+            }
+          }
+        } else {
+          if (object.seed !== null) errors.push(`snapshot ${short(id)}: only a parentless snapshot can have a seed`);
+          const parent = objects.get(object.parents[0]);
+          if (parent?.kind === "snapshot") {
+            if (parent.parallel !== object.parallel) {
+              errors.push(`snapshot ${short(id)}: first parent belongs to another Parallel`);
+            }
+            if (parent.seq + 1 !== object.seq) {
+              errors.push(`snapshot ${short(id)}: sequence does not follow its first parent`);
+            }
+          }
+          if (object.parents.length === 2 && object.parents[0] === object.parents[1]) {
+            errors.push(`snapshot ${short(id)}: duplicate parents`);
+          }
+        }
+      }
+    }
+
+    let state: unknown;
+    try {
+      state = JSON.parse(fs.readFileSync(path.join(this.meta, "state.json"), "utf8"));
+    } catch (error) {
+      errors.push(`.pvc/state.json: cannot read state (${String(error)})`);
+      return { objectCount, errors };
+    }
+    if (
+      !isRecord(state) || state.format !== 1 || typeof state.active !== "string"
+      || !isRecord(state.heads) || !nameRe.test(state.active) || state.active.includes("@")
+      || !Object.hasOwn(state.heads, state.active)
+    ) {
+      errors.push(".pvc/state.json: invalid state format");
+      return { objectCount, errors };
+    }
+    for (const [name, id] of Object.entries(state.heads)) {
+      if (!nameRe.test(name) || name.includes("@") || typeof id !== "string" || !hexRe.test(id)) {
+        errors.push(`.pvc/state.json: invalid head entry ${JSON.stringify(name)}`);
+        continue;
+      }
+      const head = requireType(id, "snapshot", `.pvc/state.json head ${name}`);
+      if (head?.kind === "snapshot" && head.parallel !== name) {
+        errors.push(`.pvc/state.json: head ${name} points to Parallel ${head.parallel}`);
+      }
+    }
+    return { objectCount, errors };
   }
   blob(bytes: Uint8Array): Hash {
     return this.put({ kind: "blob", data: Buffer.from(bytes).toString("base64") });

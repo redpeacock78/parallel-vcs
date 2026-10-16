@@ -7,6 +7,7 @@ const help = `Parallel VCS 0.1.0  |  independent snapshot universes
 
   init                               .pvc を初期化 (main@0)
   status                             作業ツリーの変更を表示
+  verify                             CAS object storeとSnapshot DAGを検査
   shot <file|dir...>                 選択した変更を即Snapshot化
   shot -A                            全ファイルの差分をSnapshot化
   stage <file|dir...>                shot の別名 (indexなし)
@@ -101,6 +102,16 @@ try {
       for (const p of s.deleted) console.log(` D ${p}`);
       for (const p of s.untracked) console.log(` ? ${p}`);
       if (!s.modified.length && !s.deleted.length && !s.untracked.length) console.log("clean");
+      break;
+    }
+    case "verify": {
+      only(argv, 0);
+      const report = repo().verify();
+      if (report.errors.length) {
+        for (const error of report.errors) console.error(`error: ${error}`);
+        console.error(`検証失敗: ${report.errors.length}件 / ${report.objectCount} objects`);
+        process.exitCode = 1;
+      } else console.log(`Verified ${report.objectCount} objects`);
       break;
     }
     case "shot":
