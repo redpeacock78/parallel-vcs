@@ -33,6 +33,8 @@ type TransactionJournal = {
   entries: TransactionEntry[];
 };
 type WorktreeTransaction = { commit(): void; rollback(): void };
+type RepositoryLock = { directory: string; preserve(): void; release(): void };
+type LockOwner = { format: 1; pid: number };
 export type State = { format: 1; active: string; heads: Record<string, Hash> };
 export type Change = {
   path: string;
@@ -105,7 +107,68 @@ export class Repo {
     }
     this.root = dir;
     this.meta = path.join(dir, metaDir);
+    this.cleanAbandonedLockClaims();
     this.recoverTransactions();
+  }
+
+  private transactionDirectory(): string {
+    return path.join(this.meta, "txn-active");
+  }
+  private readLockOwner(filename: string): LockOwner | null {
+    try {
+      const value: unknown = JSON.parse(fs.readFileSync(filename, "utf8"));
+      if (!value || typeof value !== "object") return null;
+      const owner = value as Partial<LockOwner>;
+      if (owner.format !== 1 || !Number.isInteger(owner.pid) || owner.pid! <= 0) return null;
+      return owner as LockOwner;
+    } catch {
+      return null;
+    }
+  }
+  private cleanAbandonedLockClaims(): void {
+    for (const name of fs.readdirSync(this.meta).filter(item => item.startsWith("txn-claim-"))) {
+      const directory = path.join(this.meta, name);
+      const stat = lstatMaybe(directory);
+      if (!stat?.isDirectory() || stat.isSymbolicLink()) continue;
+      const owner = this.readLockOwner(path.join(directory, "owner.json"));
+      if (owner && !this.processIsAlive(owner.pid)) fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  private acquireWriteLock(): RepositoryLock {
+    const directory = this.transactionDirectory();
+    const claim = fs.mkdtempSync(path.join(this.meta, `txn-claim-${process.pid}-`));
+    try {
+      fs.writeFileSync(
+        path.join(claim, "owner.json"),
+        `${JSON.stringify({ format: 1, pid: process.pid } satisfies LockOwner)}\n`,
+        { flag: "wx" },
+      );
+      fs.renameSync(claim, directory);
+    } catch (error) {
+      fs.rmSync(claim, { recursive: true, force: true });
+      if (!exists(directory)) throw error;
+      const owner = this.readLockOwner(path.join(directory, "owner.json"));
+      const detail = owner ? ` (pid ${owner.pid})` : "";
+      throw new VcsError(`別のpvc処理がリポジトリを更新中${detail}`);
+    }
+    let preserve = false;
+    return {
+      directory,
+      preserve: () => {
+        preserve = true;
+      },
+      release: () => {
+        if (!preserve) fs.rmSync(directory, { recursive: true, force: true });
+      },
+    };
+  }
+  private withWriteLock<T>(operation: (lock: RepositoryLock) => T): T {
+    const lock = this.acquireWriteLock();
+    try {
+      return operation(lock);
+    } finally {
+      lock.release();
+    }
   }
 
   private writeTransactionJournal(directory: string, journal: TransactionJournal): void {
@@ -213,59 +276,65 @@ export class Repo {
     }
   }
   private recoverTransactions(): void {
-    const entries = fs.readdirSync(this.meta).filter(name => name.startsWith("txn-"));
-    if (!entries.length) return;
-    if (entries.length > 1) throw new VcsError("複数のtransaction directoryがあるため自動復旧を中止");
-    const directory = path.join(this.meta, entries[0]);
+    const directory = this.transactionDirectory();
+    if (!exists(directory)) return;
     const stat = fs.lstatSync(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new VcsError(`transaction directoryが無効: ${entries[0]}`);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new VcsError("transaction slotが無効");
 
-    const journalPath = path.join(directory, "journal.json");
-    if (!exists(journalPath)) {
-      const contents = fs.readdirSync(directory);
-      const ownerMatch = /^txn-(\d+)-/.exec(entries[0]);
-      if (ownerMatch && this.processIsAlive(Number(ownerMatch[1]))) {
-        throw new VcsError(`別のpvc処理がtransactionを準備中: pid ${ownerMatch[1]}`);
-      }
-      if (contents.every(name => name.startsWith("journal-") && name.endsWith(".tmp"))) {
-        fs.rmSync(directory, { recursive: true, force: true });
-        return;
-      }
-      if (!contents.length) {
-        fs.rmSync(directory, { recursive: true, force: true });
-        return;
-      }
-      throw new VcsError(`journalのないtransaction dataが残っている: ${directory}`);
+    const owner = this.readLockOwner(path.join(directory, "owner.json"));
+    if (!owner) throw new VcsError(`transaction slotのownerが無効。内容を確認してから削除してね: ${directory}`);
+    if (this.processIsAlive(owner.pid)) {
+      throw new VcsError(`別のpvc処理がリポジトリを更新中: pid ${owner.pid}`);
     }
-    if (!fs.lstatSync(journalPath).isFile()) throw new VcsError(`transaction journalが無効: ${directory}`);
 
-    let journal: TransactionJournal;
+    const recoveryLock = path.join(directory, "recovery.lock");
     try {
-      journal = this.validateJournal(JSON.parse(fs.readFileSync(journalPath, "utf8")));
-    } catch (error) {
-      throw new VcsError(`transaction journalを読めない: ${String(error)}`);
+      fs.mkdirSync(recoveryLock);
+    } catch {
+      const recoveryOwner = this.readLockOwner(path.join(recoveryLock, "owner.json"));
+      const detail = recoveryOwner
+        ? `pid ${recoveryOwner.pid} が復旧中`
+        : "復旧lockが残っている";
+      throw new VcsError(`${detail}。復旧が中断している場合は ${recoveryLock} を削除して再実行してね`);
     }
-    const ownerMatch = /^txn-(\d+)-/.exec(entries[0]);
-    if (ownerMatch && Number(ownerMatch[1]) !== journal.ownerPid) {
-      throw new VcsError(`transaction ownerが一致しない: ${directory}`);
-    }
-    if (this.processIsAlive(journal.ownerPid)) {
-      throw new VcsError(`別のpvc処理がtransaction中: pid ${journal.ownerPid}`);
-    }
-
-    if (journal.phase === "ready" || journal.phase === "rollingBack") {
-      try {
-        this.restoreTransactionFiles(directory, journal.entries);
-        this.saveState(journal.oldState);
-        journal.phase = "rolledBack";
-        this.writeTransactionJournal(directory, journal);
-      } catch (error) {
-        throw new VcsError(`transactionの自動復旧に失敗。復旧データを保持: ${directory} (${String(error)})`);
+    const journalPath = path.join(directory, "journal.json");
+    try {
+      fs.writeFileSync(
+        path.join(recoveryLock, "owner.json"),
+        `${JSON.stringify({ format: 1, pid: process.pid } satisfies LockOwner)}\n`,
+        { flag: "wx" },
+      );
+      if (!exists(journalPath)) {
+        fs.rmSync(directory, { recursive: true, force: true });
+        return;
       }
-    } else if (journal.phase !== "preparing" && journal.phase !== "committed" && journal.phase !== "rolledBack") {
-      throw new VcsError(`transaction phaseが不明: ${journal.phase}`);
+      if (!fs.lstatSync(journalPath).isFile()) throw new VcsError(`transaction journalが無効: ${directory}`);
+
+      let journal: TransactionJournal;
+      try {
+        journal = this.validateJournal(JSON.parse(fs.readFileSync(journalPath, "utf8")));
+      } catch (error) {
+        throw new VcsError(`transaction journalを読めない: ${String(error)}`);
+      }
+      if (owner.pid !== journal.ownerPid) throw new VcsError(`transaction ownerが一致しない: ${directory}`);
+
+      if (journal.phase === "ready" || journal.phase === "rollingBack") {
+        try {
+          this.restoreTransactionFiles(directory, journal.entries);
+          this.saveState(journal.oldState);
+          journal.phase = "rolledBack";
+          this.writeTransactionJournal(directory, journal);
+        } catch (error) {
+          throw new VcsError(`transactionの自動復旧に失敗。復旧データを保持: ${directory} (${String(error)})`);
+        }
+      } else if (journal.phase !== "preparing" && journal.phase !== "committed" && journal.phase !== "rolledBack") {
+        throw new VcsError(`transaction phaseが不明: ${journal.phase}`);
+      }
+      fs.rmSync(directory, { recursive: true, force: true });
+    } catch (error) {
+      if (exists(recoveryLock)) fs.rmSync(recoveryLock, { recursive: true, force: true });
+      throw error;
     }
-    fs.rmSync(directory, { recursive: true, force: true });
   }
 
   static init(directory: string = process.cwd()): Repo {
@@ -397,15 +466,17 @@ export class Repo {
     return result;
   }
   fork(name: string, from: string = "HEAD"): Hash {
-    if (!nameRe.test(name) || name.includes("@")) throw new VcsError("Parallel名は英数字・.-_のみで先頭は英字");
-    const state = this.state;
-    if (name in state.heads) throw new VcsError(`既存のParallel: ${name}`);
-    const source = this.resolve(from);
-    const root = this.snapshot(source).root;
-    const s0 = this.writeSnapshot(name, 0, root, [], source);
-    state.heads[name] = s0;
-    this.saveState(state);
-    return s0;
+    return this.withWriteLock(() => {
+      if (!nameRe.test(name) || name.includes("@")) throw new VcsError("Parallel名は英数字・.-_のみで先頭は英字");
+      const state = this.state;
+      if (name in state.heads) throw new VcsError(`既存のParallel: ${name}`);
+      const source = this.resolve(from);
+      const root = this.snapshot(source).root;
+      const s0 = this.writeSnapshot(name, 0, root, [], source);
+      state.heads[name] = s0;
+      this.saveState(state);
+      return s0;
+    });
   }
 
   // Root-relative POSIX paths only. Never trust a user-supplied absolute/parent path.
@@ -474,6 +545,9 @@ export class Repo {
     }
   }
   shot(paths: string[], all = false): { id: Hash | null; changed: string[] } {
+    return this.withWriteLock(() => this.shotLocked(paths, all));
+  }
+  private shotLocked(paths: string[], all: boolean): { id: Hash | null; changed: string[] } {
     if (!all && paths.length === 0) throw new VcsError("pvc shot <path...> か pvc shot -A");
     const state = this.state;
     const prevId = this.head();
@@ -511,25 +585,27 @@ export class Repo {
     return { id, changed };
   }
   move(source: string, destination: string): { id: Hash | null; changed: string[] } {
-    const from = this.normalize(source);
-    const to = this.normalize(destination);
-    if (from === "." || to === "." || from === to) throw new VcsError("moveのファイル指定が無効");
-    const tracked = this.treeAt("HEAD");
-    if (!(from in tracked)) throw new VcsError(`未追跡ファイルはmoveできない: ${from}`);
-    const src = this.safeFile(from);
-    const dst = this.safeFile(to);
-    if (!exists(src) || !fs.statSync(src).isFile() || !this.equalsLive(from, tracked[from])) {
-      throw new VcsError(`move元に未Shotの変更がある: ${from}`);
-    }
-    if (exists(dst) || to in tracked) throw new VcsError(`move先が既に存在する: ${to}`);
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.renameSync(src, dst);
-    try {
-      return this.shot([from, to]);
-    } catch (error) {
-      fs.renameSync(dst, src);
-      throw error;
-    }
+    return this.withWriteLock(() => {
+      const from = this.normalize(source);
+      const to = this.normalize(destination);
+      if (from === "." || to === "." || from === to) throw new VcsError("moveのファイル指定が無効");
+      const tracked = this.treeAt("HEAD");
+      if (!(from in tracked)) throw new VcsError(`未追跡ファイルはmoveできない: ${from}`);
+      const src = this.safeFile(from);
+      const dst = this.safeFile(to);
+      if (!exists(src) || !fs.statSync(src).isFile() || !this.equalsLive(from, tracked[from])) {
+        throw new VcsError(`move元に未Shotの変更がある: ${from}`);
+      }
+      if (exists(dst) || to in tracked) throw new VcsError(`move先が既に存在する: ${to}`);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.renameSync(src, dst);
+      try {
+        return this.shotLocked([from, to], false);
+      } catch (error) {
+        fs.renameSync(dst, src);
+        throw error;
+      }
+    });
   }
 
   private assertValidTree(tree: Tree): void {
@@ -582,7 +658,7 @@ export class Repo {
 
   // Persist a recovery journal before touching the worktree. Keep backups until state
   // and journal agree so a later Repo construction can roll back an interrupted update.
-  private applyTree(from: Tree, to: Tree): WorktreeTransaction {
+  private applyTree(from: Tree, to: Tree, lock: RepositoryLock): WorktreeTransaction {
     this.assertClean();
     this.assertValidTree(from);
     this.assertValidTree(to);
@@ -602,7 +678,7 @@ export class Repo {
       }
     }
 
-    const transactionDir = fs.mkdtempSync(path.join(this.meta, `txn-${process.pid}-`));
+    const transactionDir = lock.directory;
     const staged = changes.map((relative, index) => ({
       relative,
       temporary: path.posix.join(
@@ -650,18 +726,10 @@ export class Repo {
       journal.phase = "ready";
       this.writeTransactionJournal(transactionDir, journal);
     } catch (error) {
-      try {
-        fs.rmSync(transactionDir, { recursive: true, force: true });
-      } catch { /* No worktree changes have been made; keep the original failure. */ }
       throw error;
     }
 
     let finished = false;
-    const cleanup = () => {
-      try {
-        fs.rmSync(transactionDir, { recursive: true, force: true });
-      } catch { /* Cleanup is best-effort after the worktree and state are consistent. */ }
-    };
     const rollback = () => {
       if (finished) return;
       try {
@@ -672,10 +740,10 @@ export class Repo {
         journal.phase = "rolledBack";
         this.writeTransactionJournal(transactionDir, journal);
       } catch (error) {
+        lock.preserve();
         throw new VcsError(`作業ツリーのロールバックに失敗。復旧データを保持: ${transactionDir} (${String(error)})`);
       }
       finished = true;
-      cleanup();
     };
     try {
       // Remove tracked leaves first, then prune empty directories for file/directory transitions.
@@ -706,18 +774,20 @@ export class Repo {
         journal.phase = "committed";
         this.writeTransactionJournal(transactionDir, journal);
         finished = true;
-        cleanup();
       },
       rollback,
     };
   }
   switch(name: string): Hash {
+    return this.withWriteLock(lock => this.switchLocked(name, lock));
+  }
+  private switchLocked(name: string, lock: RepositoryLock): Hash {
     const state = this.state;
     if (!(name in state.heads)) throw new VcsError(`存在しないParallel: ${name}`);
     if (state.active === name) return this.head();
     const from = this.treeAt("HEAD");
     const to = this.readTree(this.snapshot(state.heads[name]).root);
-    const transaction = this.applyTree(from, to);
+    const transaction = this.applyTree(from, to, lock);
     const nextState: State = { ...state, active: name, heads: { ...state.heads } };
     try {
       this.saveState(nextState);
@@ -830,6 +900,15 @@ export class Repo {
     resolutions: Record<string, string> = {},
     dryRun = false,
   ): { composition: Composition; unresolved: string[]; id: Hash | null } {
+    return this.withWriteLock(lock => this.composeLocked(sourceRef, into, resolutions, dryRun, lock));
+  }
+  private composeLocked(
+    sourceRef: string,
+    into: string | undefined,
+    resolutions: Record<string, string>,
+    dryRun: boolean,
+    lock: RepositoryLock,
+  ): { composition: Composition; unresolved: string[]; id: Hash | null } {
     const state = this.state;
     const parallel = into || state.active;
     const left = this.head(parallel);
@@ -863,7 +942,7 @@ export class Repo {
     const nextState: State = { ...state, heads: { ...state.heads, [parallel]: id } };
     if (parallel === state.active) {
       const old = this.readTree(this.snapshot(left).root);
-      const transaction = this.applyTree(old, comp.result);
+      const transaction = this.applyTree(old, comp.result, lock);
       try {
         this.saveState(nextState);
         transaction.commit();

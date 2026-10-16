@@ -140,12 +140,13 @@ type Snapshot = {
 **このバージョンは破壊的な実運用を想定しないPoC。必ずテスト用ディレクトリで試すこと。**
 
 - ファイル単位の3-wayのみ。renameは1つのShot内の削除＋作成として記録され、Blobの同一性は保つが、操作の意味を独立したMutationとしてはまだ格納しない。
-- 同名のファイル/ディレクトリ衝突、ファイルモード・実行権限・symlink、ignoreの外部設定、GC、remote/同期、pack圧縮、ロック・WAL、電源断耐性は未実装。
+- 同名のファイル/ディレクトリ衝突、ファイルモード・実行権限・symlink、ignoreの外部設定、GC、remote/同期、pack圧縮、WAL、電源断耐性は未実装。
 - Criss-crossによる複数の最大共通祖先は**恣意的に選択せずエラー**。仮想Base合成は未実装。
 - Coverageはファイル数ベースであり、テキストの行／AST単位の非競合率ではない。
 - journalによるプロセスクラッシュ復旧はswitchとactive Composeが対象。moveなど他コマンドの中断や電源断に対する永続性は保証しない。
 - 中断後に復旧対象ファイルがjournalの旧/新内容と一致しない場合は、自動上書きを避けて復旧を停止する。
-- トランザクション中はjournalのowner PIDで別のpvcプロセスを検出して拒否するが、shotなどを含む全操作のプロセス間ロックは未実装。
+- fork、shot、move、switch、composeは`.pvc/txn-active`の排他slotを原子的に取得してからstateを読み、並行する更新を拒否する。switchとactive Composeはjournalでプロセスクラッシュから復旧する。
+- 復旧中にプロセスが再度停止すると`.pvc/txn-active/recovery.lock`が残る。復旧が動いていないことを確認してからこのlockを削除し、コマンドを再実行する。
 - `origin`と`proof`をTopazoliteに接続する余地を設計上残しているが、**証明体系の実装は含まない**。
 
 将来的には`Mutation`を第一級オブジェクトにし、テキスト/AST/Locus単位の競合分析と、合成由来を示すProofを検討する。

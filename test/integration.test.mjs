@@ -253,8 +253,9 @@ test("起動時に中断transactionの作業ツリーとstateを復旧する", (
 
     const meta = path.join(d, ".pvc");
     const oldState = JSON.parse(readFileSync(path.join(meta, "state.json"), "utf8"));
-    const transaction = path.join(meta, "txn-2147483647-test");
+    const transaction = path.join(meta, "txn-active");
     mkdirSync(path.join(transaction, "old"), { recursive: true });
+    writeFileSync(path.join(transaction, "owner.json"), JSON.stringify({ format: 1, pid: 2147483647 }));
     copyFileSync(path.join(d, "file"), path.join(transaction, "old/0"));
     write(d, "file", "new");
     writeFileSync(path.join(meta, "state.json"), JSON.stringify({ ...oldState, active: "newer" }));
@@ -280,6 +281,23 @@ test("起動時に中断transactionの作業ツリーとstateを復旧する", (
     assert.equal(read(d, "file"), "old");
     assert.equal(JSON.parse(readFileSync(path.join(meta, "state.json"), "utf8")).active, "main");
     assert.equal(existsSync(transaction), false);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("実行中のtransaction slotが別プロセスの更新を拒否する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const transaction = path.join(d, ".pvc", "txn-active");
+    mkdirSync(transaction);
+    writeFileSync(path.join(transaction, "owner.json"), JSON.stringify({ format: 1, pid: process.pid }));
+
+    const blocked = cmd(d, "parallel", "fork", "overlap");
+    assert.equal(blocked.code, 1);
+    assert.match(blocked.err, /別のpvc処理がリポジトリを更新中/);
+    assert.equal(JSON.parse(readFileSync(path.join(d, ".pvc", "state.json"), "utf8")).heads.overlap, undefined);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
