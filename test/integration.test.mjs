@@ -278,13 +278,6 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     return;
   }
   const childUser = process.getuid() === 0 ? { uid: 65534, gid: 65534 } : {};
-  if (childUser.uid !== undefined) {
-    const nodeCheck = spawnSync(process.execPath, ["--version"], { encoding: "utf8", ...childUser });
-    if (nodeCheck.error) {
-      t.skip(`Node is not accessible to an unprivileged child (${nodeCheck.error.code})`);
-      return;
-    }
-  }
   const d = mkdirTemp();
   let bucketPath;
   try {
@@ -296,6 +289,12 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     chmodSync(d, 0o755);
     chmodSync(path.join(d, ".pvc"), 0o755);
     chmodSync(objects, 0o755);
+    const accessProbe = cmdWithOptions(d, childUser, "verify");
+    if (accessProbe.error?.code === "EACCES" || /EACCES|permission denied/i.test(accessProbe.err)) {
+      t.skip("pvc script or Node is not accessible to the unprivileged child");
+      return;
+    }
+    assert.equal(accessProbe.code, 0, `access probe: ${accessProbe.err} ${accessProbe.out}`);
     chmodSync(bucketPath, 0);
 
     const report = cmdWithOptions(d, childUser, "verify");
