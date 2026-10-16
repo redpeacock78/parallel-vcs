@@ -277,6 +277,14 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     t.skip("POSIX permissions are required");
     return;
   }
+  const childUser = process.getuid() === 0 ? { uid: 65534, gid: 65534 } : {};
+  if (childUser.uid !== undefined) {
+    const nodeCheck = spawnSync(process.execPath, ["--version"], { encoding: "utf8", ...childUser });
+    if (nodeCheck.error) {
+      t.skip(`Node is not accessible to an unprivileged child (${nodeCheck.error.code})`);
+      return;
+    }
+  }
   const d = mkdirTemp();
   let bucketPath;
   try {
@@ -290,7 +298,6 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     chmodSync(objects, 0o755);
     chmodSync(bucketPath, 0);
 
-    const childUser = process.getuid() === 0 ? { uid: 65534, gid: 65534 } : {};
     const report = cmdWithOptions(d, childUser, "verify");
     assert.equal(report.code, 1);
     assert.match(report.err, /cannot enumerate object bucket/);
