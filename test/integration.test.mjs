@@ -255,7 +255,19 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
   const d = mkdirTemp();
   try {
     ok(d, "init");
-    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside", "C:foo"]) {
+    const invalidPaths = [
+      "/bad",
+      "bad\0path",
+      "a\\..\\..\\outside",
+      "C:foo",
+      "dir/C:foo",
+      "dir/file:stream",
+      "dir/CON.txt",
+      "dir/COM¹.log",
+      "dir/trailing.",
+      "dir/trailing ",
+    ];
+    for (const invalidPath of invalidPaths) {
       const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };
       const id = objectHash(tree);
       const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
@@ -266,7 +278,7 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
     const report = cmdWithOptions(d, { timeout: 3000 }, "verify");
     assert.equal(report.error, undefined);
     assert.equal(report.code, 1);
-    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside", "C:foo"]) {
+    for (const invalidPath of invalidPaths) {
       assert.ok(
         report.err.includes(JSON.stringify(invalidPath)),
         `missing invalid-path diagnostic for ${JSON.stringify(invalidPath)}`,
@@ -304,14 +316,16 @@ test("verifyが読み取れないobject bucketを報告する", t => {
   const childUser = process.getuid() === 0 ? { uid: 65534, gid: 65534 } : {};
   const d = mkdirTemp();
   let bucketPath;
+  let metaPath;
   try {
     ok(d, "init");
     const objects = path.join(d, ".pvc", "objects");
+    metaPath = path.join(d, ".pvc");
     const bucket = readdirSync(objects).find(name => /^[a-f0-9]{2}$/.test(name));
     assert.ok(bucket);
     bucketPath = path.join(objects, bucket);
     chmodSync(d, 0o755);
-    chmodSync(path.join(d, ".pvc"), 0o777);
+    chmodSync(metaPath, 0o555);
     chmodSync(objects, 0o755);
     const accessProbe = cmdWithOptions(d, childUser, "verify");
     const scriptInaccessible = accessProbe.err.includes("MODULE_NOT_FOUND") && accessProbe.err.includes(script);
@@ -332,6 +346,7 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     assert.doesNotMatch(report.err, /^\s+at .*\.ts:/m);
   } finally {
     if (bucketPath) chmodSync(bucketPath, 0o755);
+    if (metaPath) chmodSync(metaPath, 0o755);
     rmSync(d, { recursive: true, force: true });
   }
 });

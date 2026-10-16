@@ -60,6 +60,7 @@ export type Composition = {
 const metaDir = ".pvc";
 const hexRe = /^[a-f0-9]{64}$/;
 const nameRe = /^[a-zA-Z][a-zA-Z0-9._-]*$/;
+const windowsReservedNameRe = /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
 const ignored = new Set([".pvc", ".git", "node_modules"]);
 
 export class VcsError extends Error {
@@ -95,7 +96,12 @@ function isValidTreePath(filePath: string): boolean {
     && path.win32.parse(filePath).root === ""
     && !filePath.includes("\0") && !filePath.includes("\\")
     && path.posix.normalize(filePath) === filePath
-    && !parts.some(part => !part || part === "." || part === ".." || ignored.has(part));
+    && !parts.some(part => {
+      const deviceName = part.split(".", 1)[0].replace(/[ .]+$/g, "");
+      return !part || part === "." || part === ".." || ignored.has(part)
+        || /[<>:"|?*\u0000-\u001f]/.test(part) || /[. ]$/.test(part)
+        || windowsReservedNameRe.test(deviceName);
+    });
 }
 function lstatMaybe(file: string): fs.Stats | null {
   try {
@@ -394,7 +400,15 @@ export class Repo {
     const filename = this.objectPath(id);
     if (!exists(filename)) {
       fs.mkdirSync(path.dirname(filename), { recursive: true });
-      fs.writeFileSync(filename, bytes, { flag: "wx" });
+      const temporaryDirectory = path.join(this.meta, "object-temp");
+      fs.mkdirSync(temporaryDirectory, { recursive: true });
+      const temporary = path.join(temporaryDirectory, `${process.pid}-${randomUUID()}.tmp`);
+      try {
+        fs.writeFileSync(temporary, bytes, { flag: "wx" });
+        if (!exists(filename)) fs.renameSync(temporary, filename);
+      } finally {
+        if (exists(temporary)) fs.rmSync(temporary, { force: true });
+      }
     }
     return id;
   }
@@ -411,7 +425,45 @@ export class Repo {
     return obj;
   }
   verify(): { objectCount: number; errors: string[] } {
-    return this.withWriteLock(() => this.verifyUnlocked());
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (this.verificationHasActiveTransaction()) {
+        return { objectCount: 0, errors: ["repository is being updated; retry verification"] };
+      }
+      const before = this.readStateForVerification();
+      const report = this.verifyUnlocked();
+      if (this.verificationHasActiveTransaction()) {
+        return { ...report, errors: [...report.errors, "repository is being updated; retry verification"] };
+      }
+      const after = this.readStateForVerification();
+      if (this.sameStateForVerification(before, after)) return report;
+      if (attempt === 1) {
+        return { ...report, errors: [...report.errors, "repository changed during verification; please retry"] };
+      }
+    }
+    return { objectCount: 0, errors: ["repository changed during verification; please retry"] };
+  }
+  private verificationHasActiveTransaction(): boolean {
+    try {
+      return lstatMaybe(this.transactionDirectory()) !== null;
+    } catch {
+      return true;
+    }
+  }
+  private readStateForVerification(): { bytes: Buffer | null; error: string | null } {
+    try {
+      return { bytes: fs.readFileSync(path.join(this.meta, "state.json")), error: null };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return { bytes: null, error: code || String(error) };
+    }
+  }
+  private sameStateForVerification(
+    left: { bytes: Buffer | null; error: string | null },
+    right: { bytes: Buffer | null; error: string | null },
+  ): boolean {
+    if (left.error !== right.error) return false;
+    if (left.bytes === null || right.bytes === null) return left.bytes === right.bytes;
+    return left.bytes.equals(right.bytes);
   }
   private verifyUnlocked(): { objectCount: number; errors: string[] } {
     const errors: string[] = [];
