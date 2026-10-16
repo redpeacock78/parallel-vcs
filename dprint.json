@@ -1,0 +1,18 @@
+{
+  "$schema": "https://dprint.dev/schemas/v0.json",
+  "typescript": {
+  },
+  "json": {
+  },
+  "markdown": {
+  },
+  "excludes": [
+    "**/node_modules",
+    "**/*-lock.json"
+  ],
+  "plugins": [
+    "npm:@dprint/typescript@0.96.1",
+    "npm:@dprint/json@0.25.2",
+    "npm:@dprint/markdown@0.26.0"
+  ]
+}
