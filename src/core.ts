@@ -105,9 +105,10 @@ function isValidTreePath(filePath: string): boolean {
 }
 function windowsCaseKey(value: string): string {
   let key = "";
-  for (const character of value) {
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
     const uppercase = character.toUpperCase();
-    key += [...uppercase].length === 1 ? uppercase : character;
+    key += uppercase.length === 1 ? uppercase : character;
   }
   return key;
 }

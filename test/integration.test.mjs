@@ -343,6 +343,19 @@ test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
   }
 });
 
+test("supplementary-plane case pairは別のTree pathとして扱う", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "𐐀", "capital");
+    write(d, "𐐨", "small");
+    assert.match(ok(d, "shot", "-A"), /Snapshot/);
+    assert.match(ok(d, "verify"), /^Verified \d+ objects/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("walkは除外directoryをcase-insensitiveに無視する", t => {
   if (process.platform === "win32") {
     t.skip("Case-distinct directory names are required for this POSIX regression test");
