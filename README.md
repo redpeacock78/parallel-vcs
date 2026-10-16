@@ -32,7 +32,7 @@ npm run check
 npm run lint
 ```
 
-`npm run lint`はdprintの整形チェックとREADMEのtextlintを実行する。`npm run verify`はテスト、型チェック、lintをまとめて実行し、GitHub Actionsでも使う。
+`npm run lint`はdprintの整形チェックとREADMEのtextlintを実行する。`npm run verify`はテスト、型チェック、lintをまとめて実行し、GitHub ActionsではLinuxとWindowsで実行する。
 
 ## 5分で試す
 
