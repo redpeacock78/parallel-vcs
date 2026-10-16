@@ -273,8 +273,8 @@ test("verifyが絶対pathとNUL byteを含むTreeを終了せず拒否する", (
 });
 
 test("verifyが読み取れないobject bucketを報告する", t => {
-  if (process.platform === "win32" || process.getuid?.() !== 0) {
-    t.skip("unprivileged child user requires a POSIX root test process");
+  if (process.platform === "win32" || typeof process.getuid !== "function") {
+    t.skip("POSIX permissions are required");
     return;
   }
   const d = mkdirTemp();
@@ -290,10 +290,12 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     chmodSync(objects, 0o755);
     chmodSync(bucketPath, 0);
 
-    const report = cmdWithOptions(d, { uid: 65534, gid: 65534 }, "verify");
+    const childUser = process.getuid() === 0 ? { uid: 65534, gid: 65534 } : {};
+    const report = cmdWithOptions(d, childUser, "verify");
     assert.equal(report.code, 1);
     assert.match(report.err, /cannot enumerate object bucket/);
-    assert.doesNotMatch(report.err, /Error: EACCES/);
+    assert.match(report.err, /検証失敗:/);
+    assert.doesNotMatch(report.err, /^\s+at .*\.ts:/m);
   } finally {
     if (bucketPath) chmodSync(bucketPath, 0o755);
     rmSync(d, { recursive: true, force: true });
