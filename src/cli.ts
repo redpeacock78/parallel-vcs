@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { Repo, VcsError, short } from './core.ts';
+import { Repo, short, VcsError } from "./core.ts";
 
 const help = `Parallel VCS 0.1.0  |  independent snapshot universes
 
@@ -27,13 +27,17 @@ const help = `Parallel VCS 0.1.0  |  independent snapshot universes
 `;
 const argv = process.argv.slice(2);
 const command = argv.shift();
-function fail(message: string): never { throw new VcsError(message); }
-function repo(): Repo { return new Repo(); }
+function fail(message: string): never {
+  throw new VcsError(message);
+}
+function repo(): Repo {
+  return new Repo();
+}
 function valueAfter(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
   if (i < 0) return undefined;
-  if (!args[i+1]) fail(`${flag} の値が必要`);
-  const v = args[i+1];
+  if (!args[i + 1]) fail(`${flag} の値が必要`);
+  const v = args[i + 1];
   args.splice(i, 2);
   return v;
 }
@@ -52,10 +56,22 @@ function printCoverage(r: Repo, a: string, b: string, json: boolean) {
   const left = r.resolve(a), right = r.resolve(b);
   const c = r.compare(left, right);
   const conflicts = c.conflicts.map(x => ({ path: x.path, options: r.candidates(c, x.path) }));
-  if (json) { console.log(JSON.stringify({
-    base: c.base, left, right, total: c.touched, clean: c.clean, conflicts,
-    coverage: c.percentage,
-  }, null, 2)); return; }
+  if (json) {
+    console.log(JSON.stringify(
+      {
+        base: c.base,
+        left,
+        right,
+        total: c.touched,
+        clean: c.clean,
+        conflicts,
+        coverage: c.percentage,
+      },
+      null,
+      2,
+    ));
+    return;
+  }
   console.log(`Base: ${short(c.base)}  A: ${short(left)}  B: ${short(right)}`);
   console.log(`Coverage: ${c.percentage.toFixed(1)}%  (${c.clean}/${c.touched} 非競合, ${c.conflicts.length} 競合)`);
   for (const conflict of conflicts) {
@@ -66,115 +82,141 @@ function printCoverage(r: Repo, a: string, b: string, json: boolean) {
 try {
   switch (command) {
     case undefined:
-    case 'help':
-    case '--help':
-    case '-h': console.log(help); break;
-    case 'init': {
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(help);
+      break;
+    case "init": {
       only(argv, 0);
       const r = Repo.init();
-      console.log(`Initialized ${r.meta}  main@0=${short(r.head())}`); break;
+      console.log(`Initialized ${r.meta}  main@0=${short(r.head())}`);
+      break;
     }
-    case 'status': {
+    case "status": {
       only(argv, 0);
       const r = repo(), s = r.status();
       console.log(`Parallel: ${r.state.active}  HEAD ${short(r.head())}`);
       for (const p of s.modified) console.log(` M ${p}`);
       for (const p of s.deleted) console.log(` D ${p}`);
       for (const p of s.untracked) console.log(` ? ${p}`);
-      if (!s.modified.length && !s.deleted.length && !s.untracked.length) console.log('clean');
+      if (!s.modified.length && !s.deleted.length && !s.untracked.length) console.log("clean");
       break;
     }
-    case 'shot':
-    case 'stage': {
-      const all = argv.includes('-A') || argv.includes('--all');
-      const paths = argv.filter(p => p !== '-A' && p !== '--all');
+    case "shot":
+    case "stage": {
+      const all = argv.includes("-A") || argv.includes("--all");
+      const paths = argv.filter(p => p !== "-A" && p !== "--all");
       const r = repo(), out = r.shot(paths, all);
-      console.log(out.id ? `Snapshot ${r.state.active}@${r.snapshot(out.id).seq} ${short(out.id)}: ${out.changed.join(', ')}` : '差分なし (Snapshotは増えない)');
+      console.log(
+        out.id
+          ? `Snapshot ${r.state.active}@${r.snapshot(out.id).seq} ${short(out.id)}: ${out.changed.join(", ")}`
+          : "差分なし (Snapshotは増えない)",
+      );
       break;
     }
-    case 'move':
-    case 'mv': {
+    case "move":
+    case "mv": {
       only(argv, 2);
       const r = repo(), out = r.move(argv[0], argv[1]);
       console.log(`Moved ${argv[0]} → ${argv[1]}  Snapshot ${short(out.id)}`);
       break;
     }
-    case 'parallel': {
+    case "parallel": {
       const sub = argv.shift();
       const r = repo();
-      if (sub === 'list' || !sub) {
+      if (sub === "list" || !sub) {
         only(argv, 0);
         const s = r.state;
-        for (const [name, id] of Object.entries(s.heads)) console.log(`${name === s.active ? '*' : ' '} ${name.padEnd(16)} @${r.snapshot(id).seq} ${short(id)}`);
-      } else if (sub === 'fork' || sub === 'create') {
-        const from = valueAfter(argv, '--from') || 'HEAD';
+        for (const [name, id] of Object.entries(s.heads)) {
+          console.log(`${name === s.active ? "*" : " "} ${name.padEnd(16)} @${r.snapshot(id).seq} ${short(id)}`);
+        }
+      } else if (sub === "fork" || sub === "create") {
+        const from = valueAfter(argv, "--from") || "HEAD";
         only(argv, 1);
         const id = r.fork(argv[0], from);
         console.log(`Fork ${argv[0]}@0 ${short(id)}  Seed: ${from}`);
-      } else if (sub === 'switch') {
+      } else if (sub === "switch") {
         only(argv, 1);
         const id = r.switch(argv[0]);
         console.log(`Switched to ${argv[0]} ${short(id)}`);
       } else fail(`不明なparallel操作: ${sub}`);
       break;
     }
-    case 'log': {
-      if (argv.length > 1) fail('log [parallel]');
+    case "log": {
+      if (argv.length > 1) fail("log [parallel]");
       const r = repo();
       for (const { id, snapshot: s } of r.lineage(argv[0])) {
-        console.log(`${s.parallel}@${s.seq} ${short(id)} ${s.parents.length === 2 ? ' [compose]' : ''}${s.seed ? ` [seed ${short(s.seed)}]` : ''}`);
+        console.log(
+          `${s.parallel}@${s.seq} ${short(id)} ${s.parents.length === 2 ? " [compose]" : ""}${
+            s.seed ? ` [seed ${short(s.seed)}]` : ""
+          }`,
+        );
       }
       break;
     }
-    case 'show': {
+    case "show": {
       only(argv, 1);
       const r = repo(), id = r.resolve(argv[0]), s = r.snapshot(id);
-      console.log(JSON.stringify({ id, ...s, files: r.readTree(s.root) }, null, 2)); break;
-    }
-    case 'diff': {
-      only(argv, 2);
-      const r = repo();
-      for (const d of r.diff(argv[0], argv[1])) console.log(`${d.status} ${d.path}  ${short(d.before)} → ${short(d.after)}`);
+      console.log(JSON.stringify({ id, ...s, files: r.readTree(s.root) }, null, 2));
       break;
     }
-    case 'coverage': {
-      const json = argv.includes('--json');
-      const a = argv.filter(p => p !== '--json');
+    case "diff": {
+      only(argv, 2);
+      const r = repo();
+      for (const d of r.diff(argv[0], argv[1])) {
+        console.log(`${d.status} ${d.path}  ${short(d.before)} → ${short(d.after)}`);
+      }
+      break;
+    }
+    case "coverage": {
+      const json = argv.includes("--json");
+      const a = argv.filter(p => p !== "--json");
       only(a, 2);
       printCoverage(repo(), a[0], a[1], json);
       break;
     }
-    case 'compose': {
-      const into = valueAfter(argv, '--into');
-      const takes = takeAll(argv, '--take');
-      const dry = argv.includes('--dry-run');
-      const remaining = argv.filter(p => p !== '--dry-run');
+    case "compose": {
+      const into = valueAfter(argv, "--into");
+      const takes = takeAll(argv, "--take");
+      const dry = argv.includes("--dry-run");
+      const remaining = argv.filter(p => p !== "--dry-run");
       only(remaining, 1);
       const choices: Record<string, string> = {};
       for (const t of takes) {
-        const i = t.indexOf('=');
-        if (i < 1 || i === t.length - 1) fail('--take path=left|right|base|REF を指定してね');
-        choices[t.slice(0, i)] = t.slice(i+1);
+        const i = t.indexOf("=");
+        if (i < 1 || i === t.length - 1) fail("--take path=left|right|base|REF を指定してね");
+        choices[t.slice(0, i)] = t.slice(i + 1);
       }
       const r = repo();
       const { composition: c, unresolved, id } = r.compose(remaining[0], into, choices, dry);
-      console.log(`Coverage: ${c.percentage.toFixed(1)}%  (${c.clean}/${c.touched} 非競合, ${c.conflicts.length} 競合)`);
+      console.log(
+        `Coverage: ${c.percentage.toFixed(1)}%  (${c.clean}/${c.touched} 非競合, ${c.conflicts.length} 競合)`,
+      );
       if (unresolved.length) {
-        console.log('Composeは未実行。以下を選択してね:');
+        console.log("Composeは未実行。以下を選択してね:");
         for (const p of unresolved) {
           console.log(` !! ${p}`);
           for (const o of r.candidates(c, p)) console.log(`    ${o.ref} (${short(o.hash)}) ${o.origin}`);
         }
-        console.log('例: pvc compose other --take file.txt=right');
+        console.log("例: pvc compose other --take file.txt=right");
         process.exitCode = 2;
-      } else if (dry) console.log('Dry-run: Snapshot・作業ツリーは未変更');
-      else if (id) console.log(`Composed ${into || r.state.active}@${r.snapshot(id).seq} ${short(id)}  parents=[${short(c.left)}, ${short(c.right)}]`);
-      else console.log('Compose不要');
+      } else if (dry) console.log("Dry-run: Snapshot・作業ツリーは未変更");
+      else if (id) {
+        console.log(
+          `Composed ${into || r.state.active}@${r.snapshot(id).seq} ${short(id)}  parents=[${short(c.left)}, ${
+            short(c.right)
+          }]`,
+        );
+      } else console.log("Compose不要");
       break;
     }
-    default: fail(`不明なコマンド: ${command}\npvc help を参照`);
+    default:
+      fail(`不明なコマンド: ${command}\npvc help を参照`);
   }
 } catch (e) {
-  if (e instanceof VcsError) { console.error(`pvc: ${e.message}`); process.exitCode = 1; }
-  else throw e;
+  if (e instanceof VcsError) {
+    console.error(`pvc: ${e.message}`);
+    process.exitCode = 1;
+  } else throw e;
 }

@@ -9,13 +9,28 @@
   "scripts": {
     "pvc": "node --experimental-strip-types src/cli.ts",
     "test": "node --test test/*.test.mjs",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "format": "dprint fmt",
+    "format:check": "dprint check",
+    "lint:text": "textlint \"**/*.md\"",
+    "lint": "npm run format:check && npm run lint:text",
+    "verify": "npm test && npm run check && npm run lint"
+  },
+  "devDependencies": {
+    "@textlint-ja/textlint-rule-preset-ai-writing": "^1.7.0",
+    "@types/node": "^22.0.0",
+    "dprint": "^0.63.0",
+    "textlint": "^15.8.0",
+    "textlint-rule-ja-no-redundant-expression": "^4.0.1",
+    "textlint-rule-ja-unnatural-alphabet": "^2.0.1",
+    "textlint-rule-no-doubled-joshi": "^5.1.1",
+    "textlint-rule-preset-ai-words-ja": "^1.2.1",
+    "textlint-rule-preset-ja-spacing": "^3.0.3",
+    "textlint-rule-preset-ja-technical-writing": "^12.0.2",
+    "textlint-rule-preset-japanese": "^10.0.4",
+    "typescript": "^5.8.0"
   },
   "engines": {
     "node": ">=22.6.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.8.0"
   }
 }

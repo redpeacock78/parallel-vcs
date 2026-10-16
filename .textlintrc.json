@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "@textlint-ja/preset-ai-writing": {
+      "ai-tech-writing-guideline": {
+        "severity": "info"
+      }
+    },
+    "ja-no-redundant-expression": true,
+    "ja-unnatural-alphabet": true,
+    "no-doubled-joshi": true,
+    "preset-ai-words-ja": true,
+    "preset-ja-spacing": true,
+    "preset-ja-technical-writing": true,
+    "preset-japanese": true
+  }
+}
