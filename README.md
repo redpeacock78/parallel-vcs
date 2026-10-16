@@ -142,7 +142,7 @@ type Snapshot = {
 **このバージョンは破壊的な実運用を想定しないPoC。必ずテスト用ディレクトリで試すこと。**
 
 - ファイル単位の3-wayのみ。renameは1つのShot内の削除＋作成として記録され、Blobの同一性は保つが、操作の意味を独立したMutationとしてはまだ格納しない。
-- 同名のファイル/ディレクトリ衝突、ファイルモード・実行権限・symlink、ignoreの外部設定、GC、remote/同期、pack圧縮、WAL、電源断耐性は未実装。
+- ファイルモード・実行権限の保存、symlinkの保存（MVPではShotを拒否）、ignoreの外部設定、remote/同期、pack圧縮、永続WAL、電源断耐性は未実装。Tree内のpath衝突検証とCASのGCは実装済み。
 - Criss-crossによる複数の最大共通祖先は**恣意的に選択せずエラー**。仮想Base合成は未実装。
 - Coverageはファイル数ベースであり、テキストの行／AST単位の非競合率ではない。
 - journalによるプロセスクラッシュ復旧はswitchとactive Composeが対象。moveなど他コマンドの中断や電源断に対する永続性は保証しない。
