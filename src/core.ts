@@ -103,6 +103,26 @@ function isValidTreePath(filePath: string): boolean {
         || windowsReservedNameRe.test(deviceName);
     });
 }
+function treePathCollisions(filePaths: Iterable<string>): string[] {
+  const byCaseFoldedPath = new Map<string, string>();
+  const collisions: string[] = [];
+  for (const filePath of filePaths) {
+    if (!isValidTreePath(filePath)) continue;
+    const key = filePath.toLowerCase();
+    const previous = byCaseFoldedPath.get(key);
+    if (previous) collisions.push(`case-insensitive path collision between ${previous} and ${filePath}`);
+    else byCaseFoldedPath.set(key, filePath);
+  }
+  for (const filePath of byCaseFoldedPath.values()) {
+    let parent = path.posix.dirname(filePath);
+    while (parent !== "." && parent !== "/") {
+      const parentFile = byCaseFoldedPath.get(parent.toLowerCase());
+      if (parentFile) collisions.push(`file/directory collision between ${parentFile} and ${filePath}`);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  return collisions;
+}
 function lstatMaybe(file: string): fs.Stats | null {
   try {
     return fs.lstatSync(file);
@@ -552,7 +572,6 @@ export class Repo {
               continue;
             }
             let valid = true;
-            const validPaths = new Set<string>();
             for (const [filePath, blobId] of Object.entries(value.files)) {
               if (!isValidTreePath(filePath)) {
                 errors.push(`${relativePath}: invalid tree path ${JSON.stringify(filePath)}`);
@@ -562,19 +581,10 @@ export class Repo {
                 errors.push(`${relativePath}: invalid blob reference for ${JSON.stringify(filePath)}`);
                 valid = false;
               }
-              if (isValidTreePath(filePath)) {
-                validPaths.add(filePath);
-              }
             }
-            for (const filePath of validPaths) {
-              let parent = path.posix.dirname(filePath);
-              while (parent !== "." && parent !== "/") {
-                if (Object.hasOwn(value.files, parent)) {
-                  errors.push(`${relativePath}: file/directory collision between ${parent} and ${filePath}`);
-                  valid = false;
-                }
-                parent = path.posix.dirname(parent);
-              }
+            for (const collision of treePathCollisions(Object.keys(value.files))) {
+              errors.push(`${relativePath}: ${collision}`);
+              valid = false;
             }
             if (!valid) continue;
             objects.set(id, value as unknown as TreeObject);
@@ -791,7 +801,7 @@ export class Repo {
     if (!fs.statSync(absolute).isDirectory()) return [];
     const out: string[] = [];
     for (const name of fs.readdirSync(absolute).sort()) {
-      if (ignored.has(name)) continue;
+      if (ignored.has(name.toLowerCase())) continue;
       const child = relative === "." ? name : `${relative}/${name}`;
       out.push(...this.walk(child));
     }
@@ -896,12 +906,9 @@ export class Repo {
     const files = new Set(Object.keys(tree));
     for (const file of files) {
       if (!isValidTreePath(file)) throw new VcsError(`Tree pathが無効: ${JSON.stringify(file)}`);
-      let parent = path.posix.dirname(file);
-      while (parent !== ".") {
-        if (files.has(parent)) throw new VcsError(`ファイル/ディレクトリが衝突するTree: ${parent} と ${file}`);
-        parent = path.posix.dirname(parent);
-      }
     }
+    const collisions = treePathCollisions(files);
+    if (collisions.length) throw new VcsError(`Tree内でpathが衝突する: ${collisions.join("; ")}`);
   }
   private pruneEmptyParents(paths: string[]): void {
     const directories = new Set<string>();

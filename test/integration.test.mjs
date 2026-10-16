@@ -291,6 +291,70 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
   }
 });
 
+test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
+  const cases = [
+    {
+      files: { foo: "f".repeat(64), FOO: "e".repeat(64) },
+      diagnostic: /case-insensitive path collision between foo and FOO/,
+    },
+    {
+      files: { foo: "f".repeat(64), "FOO/bar": "e".repeat(64) },
+      diagnostic: /file\/directory collision between foo and FOO\/bar/,
+    },
+  ];
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    for (const { files, diagnostic } of cases) {
+      const tree = { kind: "tree", files };
+      const id = objectHash(tree);
+      const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+      mkdirSync(path.dirname(objectPath), { recursive: true });
+      writeFileSync(objectPath, JSON.stringify(tree));
+
+      const report = cmd(d, "verify");
+      assert.equal(report.code, 1);
+      assert.match(report.err, diagnostic);
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+
+  if (process.platform === "win32") {
+    t.skip("Case-distinct filesystem entries are required to test portable path collisions");
+    return;
+  }
+  for (const entries of [["foo", "FOO"], ["foo", "FOO/bar"]]) {
+    const repo = mkdirTemp();
+    try {
+      ok(repo, "init");
+      for (const [index, file] of entries.entries()) write(repo, file, `content ${index}`);
+      const shot = cmd(repo, "shot", "-A");
+      assert.equal(shot.code, 1);
+      assert.match(shot.err, /Tree内でpathが衝突する/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }
+});
+
+test("walkは除外directoryをcase-insensitiveに無視する", t => {
+  if (process.platform === "win32") {
+    t.skip("Case-distinct directory names are required for this POSIX regression test");
+    return;
+  }
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, ".PVC/state-copy.json", "ignored");
+    write(d, "Node_Modules/package.json", "ignored");
+    assert.match(ok(d, "status"), /^Parallel: main .*\nclean/m);
+    assert.match(ok(d, "shot", "-A"), /差分なし/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("shotがPOSIX上のbackslash名を拒否してverifyと書き込み規則を揃える", t => {
   if (process.platform === "win32") {
     t.skip("Windows does not allow backslashes in file names");

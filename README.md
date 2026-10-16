@@ -150,6 +150,7 @@ type Snapshot = {
 - `pvc verify`はCAS objectのhash、形式、blob/tree/snapshot間の参照、stateのHEADを確認する。中断した操作による未参照オブジェクトは許容する。
 - Treeのファイルpathはroot-relative POSIX形式で保存する。
 - absolute path、parent traversal、NUL byte、backslash、Windowsのdrive-relative pathはShotできない。Windowsで無効な文字、予約デバイス名、末尾の空白・ドットを含むpathもShotできない。
+- Windowsで同じpathとして扱われるTree entryの衝突もShot時に拒否する。
 - 復旧中にプロセスが再度停止すると`.pvc/txn-active/recovery.lock`が残る。復旧が動いていないことを確認してからこのlockを削除し、コマンドを再実行する。
 - `origin`と`proof`をTopazoliteに接続する余地を設計上残しているが、**証明体系の実装は含まない**。
 
