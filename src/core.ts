@@ -407,20 +407,43 @@ export class Repo {
     const types = new Map<Hash, ObjectValue["kind"]>();
     let objectCount = 0;
     const objectDirectory = path.join(this.meta, "objects");
-    const directoryStat = lstatMaybe(objectDirectory);
-    if (!directoryStat || !directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    let directoryStat: fs.Stats | null = null;
+    let directoryStatFailed = false;
+    try {
+      directoryStat = lstatMaybe(objectDirectory);
+    } catch (error) {
+      directoryStatFailed = true;
+      errors.push(`.pvc/objects: cannot inspect CAS object directory (${String(error)})`);
+    }
+    if (!directoryStatFailed && (!directoryStat || !directoryStat.isDirectory() || directoryStat.isSymbolicLink())) {
       errors.push(".pvc/objects: CAS object directory is missing or invalid");
-    } else {
-      for (const bucket of fs.readdirSync(objectDirectory, { withFileTypes: true })) {
+    } else if (directoryStat) {
+      let buckets: fs.Dirent[] = [];
+      try {
+        buckets = fs.readdirSync(objectDirectory, { withFileTypes: true });
+      } catch (error) {
+        errors.push(`.pvc/objects: cannot enumerate object buckets (${String(error)})`);
+      }
+      for (const bucket of buckets) {
         const bucketPath = path.join(objectDirectory, bucket.name);
-        if (!bucket.isDirectory() || bucket.isSymbolicLink() || !/^[a-f0-9]{2}$/.test(bucket.name)) {
+        if (
+          !bucket.isDirectory() || bucket.isSymbolicLink() || bucket.name.length !== 2
+          || !/^[a-f0-9]{2}$/.test(bucket.name)
+        ) {
           errors.push(`${path.relative(this.meta, bucketPath)}: invalid object bucket`);
           continue;
         }
-        for (const file of fs.readdirSync(bucketPath, { withFileTypes: true })) {
+        let files: fs.Dirent[];
+        try {
+          files = fs.readdirSync(bucketPath, { withFileTypes: true });
+        } catch (error) {
+          errors.push(`${path.relative(this.meta, bucketPath)}: cannot enumerate object bucket (${String(error)})`);
+          continue;
+        }
+        for (const file of files) {
           const filePath = path.join(bucketPath, file.name);
           const relativePath = path.relative(this.meta, filePath).split(path.sep).join("/");
-          if (!file.isFile() || file.isSymbolicLink() || !/^[a-f0-9]{62}$/.test(file.name)) {
+          if (!file.isFile() || file.isSymbolicLink() || file.name.length !== 62 || !/^[a-f0-9]{62}$/.test(file.name)) {
             errors.push(`${relativePath}: invalid object entry`);
             continue;
           }
@@ -466,11 +489,12 @@ export class Repo {
             }
             let valid = true;
             const files = Object.keys(value.files);
+            const validPaths = new Set<string>();
             for (const [filePath, blobId] of Object.entries(value.files)) {
               const parts = filePath.split("/");
               if (
                 !filePath || filePath === "." || path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)
-                || path.posix.normalize(filePath) !== filePath || parts.some(part =>
+                || filePath.includes("\0") || path.posix.normalize(filePath) !== filePath || parts.some(part =>
                   !part || part === "." || part === ".." || ignored.has(part)
                 )
               ) {
@@ -481,10 +505,17 @@ export class Repo {
                 errors.push(`${relativePath}: invalid blob reference for ${JSON.stringify(filePath)}`);
                 valid = false;
               }
+              if (
+                filePath && filePath !== "." && !path.posix.isAbsolute(filePath) && !path.win32.isAbsolute(filePath)
+                && !filePath.includes("\0") && path.posix.normalize(filePath) === filePath
+                && !parts.some(part => !part || part === "." || part === ".." || ignored.has(part))
+              ) {
+                validPaths.add(filePath);
+              }
             }
-            for (const filePath of files) {
+            for (const filePath of validPaths) {
               let parent = path.posix.dirname(filePath);
-              while (parent !== ".") {
+              while (parent !== "." && parent !== "/") {
                 if (Object.hasOwn(value.files, parent)) {
                   errors.push(`${relativePath}: file/directory collision between ${parent} and ${filePath}`);
                   valid = false;

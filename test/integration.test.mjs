@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -18,14 +20,20 @@ import { fileURLToPath } from "node:url";
 
 const script = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const mkdirTemp = () => mkdtempSync(path.join(tmpdir(), "pvc-test-"));
-function cmd(cwd, ...args) {
+function runCommand(cwd, args, options = {}) {
   const cp = spawnSync(process.execPath, [
     "--disable-warning=ExperimentalWarning",
     "--experimental-strip-types",
     script,
     ...args,
-  ], { cwd, encoding: "utf8" });
-  return { code: cp.status, out: cp.stdout, err: cp.stderr };
+  ], { cwd, encoding: "utf8", ...options });
+  return { code: cp.status, out: cp.stdout || "", err: cp.stderr || "", error: cp.error };
+}
+function cmd(cwd, ...args) {
+  return runCommand(cwd, args);
+}
+function cmdWithOptions(cwd, options, ...args) {
+  return runCommand(cwd, args, options);
 }
 function ok(cwd, ...args) {
   const result = cmd(cwd, ...args);
@@ -239,6 +247,55 @@ test("verifyがCAS objectの欠落参照を検出する", () => {
     assert.equal(report.code, 1);
     assert.match(report.err, /referenced blob .* is missing or has the wrong type/);
   } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyが絶対pathとNUL byteを含むTreeを終了せず拒否する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    for (const invalidPath of ["/bad", "bad\0path"]) {
+      const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };
+      const id = objectHash(tree);
+      const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+      mkdirSync(path.dirname(objectPath), { recursive: true });
+      writeFileSync(objectPath, JSON.stringify(tree));
+    }
+
+    const report = cmdWithOptions(d, { timeout: 3000 }, "verify");
+    assert.equal(report.error, undefined);
+    assert.equal(report.code, 1);
+    assert.match(report.err, /invalid tree path/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyが読み取れないobject bucketを報告する", t => {
+  if (process.platform === "win32" || process.getuid?.() !== 0) {
+    t.skip("unprivileged child user requires a POSIX root test process");
+    return;
+  }
+  const d = mkdirTemp();
+  let bucketPath;
+  try {
+    ok(d, "init");
+    const objects = path.join(d, ".pvc", "objects");
+    const bucket = readdirSync(objects).find(name => /^[a-f0-9]{2}$/.test(name));
+    assert.ok(bucket);
+    bucketPath = path.join(objects, bucket);
+    chmodSync(d, 0o755);
+    chmodSync(path.join(d, ".pvc"), 0o755);
+    chmodSync(objects, 0o755);
+    chmodSync(bucketPath, 0);
+
+    const report = cmdWithOptions(d, { uid: 65534, gid: 65534 }, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /cannot enumerate object bucket/);
+    assert.doesNotMatch(report.err, /Error: EACCES/);
+  } finally {
+    if (bucketPath) chmodSync(bucketPath, 0o755);
     rmSync(d, { recursive: true, force: true });
   }
 });
