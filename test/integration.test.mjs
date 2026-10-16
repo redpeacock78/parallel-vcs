@@ -268,6 +268,7 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
       "dir/trailing ",
       ".PVC/state.json",
       "Node_Modules/package.json",
+      "a".repeat(256),
     ];
     for (const invalidPath of invalidPaths) {
       const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };
@@ -301,6 +302,10 @@ test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
       files: { foo: "f".repeat(64), "FOO/bar": "e".repeat(64) },
       diagnostic: /file\/directory collision between foo and FOO\/bar/,
     },
+    {
+      files: { S: "f".repeat(64), "ſ": "e".repeat(64) },
+      diagnostic: /case-insensitive path collision between S and ſ/,
+    },
   ];
   const d = mkdirTemp();
   try {
@@ -324,7 +329,7 @@ test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
     t.skip("Case-distinct filesystem entries are required to test portable path collisions");
     return;
   }
-  for (const entries of [["foo", "FOO"], ["foo", "FOO/bar"]]) {
+  for (const entries of [["foo", "FOO"], ["foo", "FOO/bar"], ["S", "ſ"]]) {
     const repo = mkdirTemp();
     try {
       ok(repo, "init");

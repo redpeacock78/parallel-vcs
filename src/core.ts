@@ -98,17 +98,25 @@ function isValidTreePath(filePath: string): boolean {
     && path.posix.normalize(filePath) === filePath
     && !parts.some(part => {
       const deviceName = part.split(".", 1)[0].replace(/[ .]+$/g, "");
-      return !part || part === "." || part === ".." || ignored.has(part.toLowerCase())
+      return !part || part.length > 255 || part === "." || part === ".." || ignored.has(part.toLowerCase())
         || /[<>:"|?*\u0000-\u001f]/.test(part) || /[. ]$/.test(part)
         || windowsReservedNameRe.test(deviceName);
     });
+}
+function windowsCaseKey(value: string): string {
+  let key = "";
+  for (const character of value) {
+    const uppercase = character.toUpperCase();
+    key += [...uppercase].length === 1 ? uppercase : character;
+  }
+  return key;
 }
 function treePathCollisions(filePaths: Iterable<string>): string[] {
   const byCaseFoldedPath = new Map<string, string>();
   const collisions: string[] = [];
   for (const filePath of filePaths) {
     if (!isValidTreePath(filePath)) continue;
-    const key = filePath.toLowerCase();
+    const key = windowsCaseKey(filePath);
     const previous = byCaseFoldedPath.get(key);
     if (previous) collisions.push(`case-insensitive path collision between ${previous} and ${filePath}`);
     else byCaseFoldedPath.set(key, filePath);
@@ -116,7 +124,7 @@ function treePathCollisions(filePaths: Iterable<string>): string[] {
   for (const filePath of byCaseFoldedPath.values()) {
     let parent = path.posix.dirname(filePath);
     while (parent !== "." && parent !== "/") {
-      const parentFile = byCaseFoldedPath.get(parent.toLowerCase());
+      const parentFile = byCaseFoldedPath.get(windowsCaseKey(parent));
       if (parentFile) collisions.push(`file/directory collision between ${parentFile} and ${filePath}`);
       parent = path.posix.dirname(parent);
     }
