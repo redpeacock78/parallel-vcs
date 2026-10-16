@@ -290,7 +290,11 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     chmodSync(path.join(d, ".pvc"), 0o755);
     chmodSync(objects, 0o755);
     const accessProbe = cmdWithOptions(d, childUser, "verify");
-    if (accessProbe.error?.code === "EACCES" || /EACCES|permission denied/i.test(accessProbe.err)) {
+    const scriptInaccessible = accessProbe.err.includes("MODULE_NOT_FOUND") && accessProbe.err.includes(script);
+    if (
+      accessProbe.error?.code === "EACCES" || /EACCES|permission denied/i.test(accessProbe.err)
+      || scriptInaccessible
+    ) {
       t.skip("pvc script or Node is not accessible to the unprivileged child");
       return;
     }
