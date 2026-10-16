@@ -126,13 +126,22 @@ export class Repo {
     }
   }
   private cleanAbandonedLockClaims(): void {
-    for (const name of fs.readdirSync(this.meta).filter(item => item.startsWith("txn-claim-"))) {
+    for (
+      const name of fs.readdirSync(this.meta).filter(item =>
+        item.startsWith("txn-claim-") || item.startsWith("txn-release-")
+      )
+    ) {
       const directory = path.join(this.meta, name);
       const stat = lstatMaybe(directory);
       if (!stat?.isDirectory() || stat.isSymbolicLink()) continue;
       const owner = this.readLockOwner(path.join(directory, "owner.json"));
       if (owner && !this.processIsAlive(owner.pid)) fs.rmSync(directory, { recursive: true, force: true });
     }
+  }
+  private retireTransactionDirectory(directory: string): void {
+    const retired = path.join(this.meta, `txn-release-${process.pid}-${randomUUID()}`);
+    fs.renameSync(directory, retired);
+    fs.rmSync(retired, { recursive: true, force: true });
   }
   private acquireWriteLock(): RepositoryLock {
     const directory = this.transactionDirectory();
@@ -158,7 +167,7 @@ export class Repo {
         preserve = true;
       },
       release: () => {
-        if (!preserve) fs.rmSync(directory, { recursive: true, force: true });
+        if (!preserve) this.retireTransactionDirectory(directory);
       },
     };
   }
@@ -305,7 +314,7 @@ export class Repo {
         { flag: "wx" },
       );
       if (!exists(journalPath)) {
-        fs.rmSync(directory, { recursive: true, force: true });
+        this.retireTransactionDirectory(directory);
         return;
       }
       if (!fs.lstatSync(journalPath).isFile()) throw new VcsError(`transaction journalが無効: ${directory}`);
@@ -330,7 +339,7 @@ export class Repo {
       } else if (journal.phase !== "preparing" && journal.phase !== "committed" && journal.phase !== "rolledBack") {
         throw new VcsError(`transaction phaseが不明: ${journal.phase}`);
       }
-      fs.rmSync(directory, { recursive: true, force: true });
+      this.retireTransactionDirectory(directory);
     } catch (error) {
       if (exists(recoveryLock)) fs.rmSync(recoveryLock, { recursive: true, force: true });
       throw error;
