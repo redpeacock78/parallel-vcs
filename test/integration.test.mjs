@@ -356,7 +356,7 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
   }
 });
 
-test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
+test("verifyはcase-insensitiveなTree path衝突を拒否する", () => {
   const cases = [
     {
       files: { foo: "f".repeat(64), FOO: "e".repeat(64) },
@@ -388,7 +388,9 @@ test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
+});
 
+test("shotはcase-insensitiveなTree path衝突を拒否する", t => {
   if (process.platform === "win32") {
     t.skip("Case-distinct filesystem entries are required to test portable path collisions");
     return;
@@ -516,11 +518,19 @@ test("verifyがstateのHEAD参照を確認する", () => {
   }
 });
 
-test("外部を指すsymlinkとdangling symlinkを拒否", () => {
+test("外部を指すsymlinkとdangling symlinkを拒否", t => {
   const d = mkdirTemp();
   try {
     ok(d, "init");
-    symlinkSync(path.join(d, "missing"), path.join(d, "dangling"));
+    try {
+      symlinkSync(path.join(d, "missing"), path.join(d, "dangling"));
+    } catch (error) {
+      if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)) {
+        t.skip("Symlink privileges are unavailable on this Windows runner");
+        return;
+      }
+      throw error;
+    }
     assert.equal(cmd(d, "shot", "dangling").code, 1);
     assert.equal(cmd(d, "shot", "-A").code, 1);
   } finally {
