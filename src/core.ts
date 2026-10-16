@@ -471,6 +471,52 @@ export class Repo {
     }
     return { objectCount: 0, errors: ["repository changed during verification; please retry"] };
   }
+  gc(dryRun = false): { objectCount: number; reachableCount: number; prunableCount: number; prunedCount: number } {
+    return this.withWriteLock(() => {
+      const report = this.verifyUnlocked();
+      if (report.errors.length) {
+        throw new VcsError(`CAS検証に失敗したためGCを中止 (${report.errors.length} errors)`);
+      }
+
+      const reachable = new Set<Hash>();
+      const pending = Object.values(this.state.heads);
+      while (pending.length) {
+        const id = pending.pop()!;
+        if (reachable.has(id)) continue;
+        const object = this.get(id);
+        reachable.add(id);
+        if (object.kind === "tree") {
+          for (const blob of Object.values(object.files)) pending.push(blob);
+        } else if (object.kind === "snapshot") {
+          pending.push(object.root);
+          for (const parent of object.parents) pending.push(parent);
+          if (object.seed) pending.push(object.seed);
+        }
+      }
+
+      const objectDirectory = path.join(this.meta, "objects");
+      const objectIds: Hash[] = [];
+      for (const bucket of fs.readdirSync(objectDirectory, { withFileTypes: true })) {
+        for (const file of fs.readdirSync(path.join(objectDirectory, bucket.name))) {
+          objectIds.push(`${bucket.name}${file}`);
+        }
+      }
+      const prunable = objectIds.filter(id => !reachable.has(id));
+      if (!dryRun) {
+        for (const id of prunable) fs.unlinkSync(this.objectPath(id));
+        for (const bucket of fs.readdirSync(objectDirectory, { withFileTypes: true })) {
+          const bucketPath = path.join(objectDirectory, bucket.name);
+          if (fs.readdirSync(bucketPath).length === 0) fs.rmdirSync(bucketPath);
+        }
+      }
+      return {
+        objectCount: report.objectCount,
+        reachableCount: reachable.size,
+        prunableCount: prunable.length,
+        prunedCount: dryRun ? 0 : prunable.length,
+      };
+    });
+  }
   private verificationHasActiveTransaction(): boolean {
     try {
       return lstatMaybe(this.transactionDirectory()) !== null;

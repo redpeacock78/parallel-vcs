@@ -79,6 +79,7 @@ pvc compose variant --take readme.txt=right
 | `pvc init`                                | `main@0`を生成                                                  |
 | `pvc status`                              | 作業ツリーの変更状態を表示                                      |
 | `pvc verify`                              | CAS object storeとSnapshot DAGの整合性を確認                    |
+| `pvc gc [--dry-run]`                      | 全Parallelの履歴から到達できないCAS objectを削除                |
 | `pvc shot file1 [file2...]` / `pvc stage` | 選択変更の差分のみを使い、即Snapshot化。ステージング領域なし    |
 | `pvc shot -A`                             | 未追跡追加・変更・削除を一括でShot                              |
 | `pvc move from to`                        | 1回の改名につき1つのSnapshotを作成。Blobは再利用                |
@@ -148,6 +149,7 @@ type Snapshot = {
 - 中断後に復旧対象ファイルがjournalの旧/新内容と一致しない場合は、自動上書きを避けて復旧を停止する。
 - fork、shot、move、switch、composeは`.pvc/txn-active`の排他slotを原子的に取得してからstateを読み、並行する更新を拒否する。switchとactive Composeはjournalでプロセスクラッシュから復旧する。
 - `pvc verify`はCAS objectのhash、形式、blob/tree/snapshot間の参照、stateのHEADを確認する。中断した操作による未参照オブジェクトは許容する。
+- `pvc gc`は全ParallelのHEADからParent、Seed、Tree、Blobを辿り、到達できないCAS objectを削除する。`--dry-run`で削除候補を確認でき、CASに不整合があれば削除を中止する。
 - Treeのファイルpathはroot-relative POSIX形式で保存する。
 - absolute path、parent traversal、NUL byte、backslash、Windowsのdrive-relative pathはShotできない。Windowsで無効な文字、予約デバイス名、末尾の空白・ドットを含むpathもShotできない。
 - Windowsで同じpathとして扱われるTree entryの衝突もShot時に拒否する。

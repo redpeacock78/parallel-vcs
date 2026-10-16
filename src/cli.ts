@@ -8,6 +8,7 @@ const help = `Parallel VCS 0.1.0  |  independent snapshot universes
   init                               .pvc を初期化 (main@0)
   status                             作業ツリーの変更を表示
   verify                             CAS object storeとSnapshot DAGを検査
+  gc [--dry-run]                     到達不能なCAS objectを削除
   shot <file|dir...>                 選択した変更を即Snapshot化
   shot -A                            全ファイルの差分をSnapshot化
   stage <file|dir...>                shot の別名 (indexなし)
@@ -112,6 +113,17 @@ try {
         console.error(`検証失敗: ${report.errors.length}件 / ${report.objectCount} objects`);
         process.exitCode = 1;
       } else console.log(`Verified ${report.objectCount} objects`);
+      break;
+    }
+    case "gc": {
+      const dryRun = argv.includes("--dry-run");
+      only(argv.filter(arg => arg !== "--dry-run"), 0);
+      const report = repo().gc(dryRun);
+      if (dryRun) {
+        console.log(`Would remove ${report.prunableCount} unreachable objects (${report.reachableCount} reachable)`);
+      } else {
+        console.log(`Removed ${report.prunedCount} unreachable objects (${report.reachableCount} reachable retained)`);
+      }
       break;
     }
     case "shot":
