@@ -148,7 +148,7 @@ type Snapshot = {
 - 中断後に復旧対象ファイルがjournalの旧/新内容と一致しない場合は、自動上書きを避けて復旧を停止する。
 - fork、shot、move、switch、composeは`.pvc/txn-active`の排他slotを原子的に取得してからstateを読み、並行する更新を拒否する。switchとactive Composeはjournalでプロセスクラッシュから復旧する。
 - `pvc verify`はCAS objectのhash、形式、blob/tree/snapshot間の参照、stateのHEADを確認する。中断した操作による未参照オブジェクトは許容する。
-- Treeのファイルpathはroot-relative POSIX形式で保存する。absolute path、parent traversal、NUL byte、backslashを含むパスはShotできない。
+- Treeのファイルpathはroot-relative POSIX形式で保存する。absolute path、parent traversal、NUL byte、backslash、Windowsのdrive-relative pathを含むパスはShotできない。
 - 復旧中にプロセスが再度停止すると`.pvc/txn-active/recovery.lock`が残る。復旧が動いていないことを確認してからこのlockを削除し、コマンドを再実行する。
 - `origin`と`proof`をTopazoliteに接続する余地を設計上残しているが、**証明体系の実装は含まない**。
 

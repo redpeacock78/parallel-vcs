@@ -255,7 +255,7 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
   const d = mkdirTemp();
   try {
     ok(d, "init");
-    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside"]) {
+    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside", "C:foo"]) {
       const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };
       const id = objectHash(tree);
       const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
@@ -266,7 +266,7 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
     const report = cmdWithOptions(d, { timeout: 3000 }, "verify");
     assert.equal(report.error, undefined);
     assert.equal(report.code, 1);
-    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside"]) {
+    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside", "C:foo"]) {
       assert.ok(
         report.err.includes(JSON.stringify(invalidPath)),
         `missing invalid-path diagnostic for ${JSON.stringify(invalidPath)}`,
@@ -311,7 +311,7 @@ test("verifyが読み取れないobject bucketを報告する", t => {
     assert.ok(bucket);
     bucketPath = path.join(objects, bucket);
     chmodSync(d, 0o755);
-    chmodSync(path.join(d, ".pvc"), 0o755);
+    chmodSync(path.join(d, ".pvc"), 0o777);
     chmodSync(objects, 0o755);
     const accessProbe = cmdWithOptions(d, childUser, "verify");
     const scriptInaccessible = accessProbe.err.includes("MODULE_NOT_FOUND") && accessProbe.err.includes(script);

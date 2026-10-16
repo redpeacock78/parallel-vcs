@@ -92,6 +92,7 @@ function isValidTreePath(filePath: string): boolean {
   const parts = filePath.split("/");
   return Boolean(filePath) && filePath !== "."
     && !path.posix.isAbsolute(filePath) && !path.win32.isAbsolute(filePath)
+    && path.win32.parse(filePath).root === ""
     && !filePath.includes("\0") && !filePath.includes("\\")
     && path.posix.normalize(filePath) === filePath
     && !parts.some(part => !part || part === "." || part === ".." || ignored.has(part));
@@ -410,6 +411,9 @@ export class Repo {
     return obj;
   }
   verify(): { objectCount: number; errors: string[] } {
+    return this.withWriteLock(() => this.verifyUnlocked());
+  }
+  private verifyUnlocked(): { objectCount: number; errors: string[] } {
     const errors: string[] = [];
     const objects = new Map<Hash, ObjectValue>();
     const types = new Map<Hash, ObjectValue["kind"]>();
