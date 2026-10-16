@@ -88,6 +88,14 @@ function exists(file: string): boolean {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function isValidTreePath(filePath: string): boolean {
+  const parts = filePath.split("/");
+  return Boolean(filePath) && filePath !== "."
+    && !path.posix.isAbsolute(filePath) && !path.win32.isAbsolute(filePath)
+    && !filePath.includes("\0") && !filePath.includes("\\")
+    && path.posix.normalize(filePath) === filePath
+    && !parts.some(part => !part || part === "." || part === ".." || ignored.has(part));
+}
 function lstatMaybe(file: string): fs.Stats | null {
   try {
     return fs.lstatSync(file);
@@ -488,15 +496,9 @@ export class Repo {
               continue;
             }
             let valid = true;
-            const files = Object.keys(value.files);
             const validPaths = new Set<string>();
             for (const [filePath, blobId] of Object.entries(value.files)) {
-              const parts = filePath.split("/");
-              if (
-                !filePath || filePath === "." || path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)
-                || filePath.includes("\0") || filePath.includes("\\") || path.posix.normalize(filePath) !== filePath
-                || parts.some(part => !part || part === "." || part === ".." || ignored.has(part))
-              ) {
+              if (!isValidTreePath(filePath)) {
                 errors.push(`${relativePath}: invalid tree path ${JSON.stringify(filePath)}`);
                 valid = false;
               }
@@ -504,11 +506,7 @@ export class Repo {
                 errors.push(`${relativePath}: invalid blob reference for ${JSON.stringify(filePath)}`);
                 valid = false;
               }
-              if (
-                filePath && filePath !== "." && !path.posix.isAbsolute(filePath) && !path.win32.isAbsolute(filePath)
-                && !filePath.includes("\0") && !filePath.includes("\\") && path.posix.normalize(filePath) === filePath
-                && !parts.some(part => !part || part === "." || part === ".." || ignored.has(part))
-              ) {
+              if (isValidTreePath(filePath)) {
                 validPaths.add(filePath);
               }
             }
@@ -626,6 +624,7 @@ export class Repo {
     return Buffer.from(obj.data, "base64");
   }
   writeTree(files: Tree): Hash {
+    this.assertValidTree(files);
     return this.put({ kind: "tree", files: sortedTree(files) });
   }
   readTree(id: Hash): Tree {
@@ -709,6 +708,7 @@ export class Repo {
 
   // Root-relative POSIX paths only. Never trust a user-supplied absolute/parent path.
   normalize(input: string): string {
+    if (input.includes("\0")) throw new VcsError(`NUL byteを含むパスは使えない: ${input}`);
     const target = path.resolve(this.root, input);
     const rel = path.relative(this.root, target).split(path.sep).join("/");
     if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) {
@@ -839,6 +839,7 @@ export class Repo {
   private assertValidTree(tree: Tree): void {
     const files = new Set(Object.keys(tree));
     for (const file of files) {
+      if (!isValidTreePath(file)) throw new VcsError(`Tree pathが無効: ${JSON.stringify(file)}`);
       let parent = path.posix.dirname(file);
       while (parent !== ".") {
         if (files.has(parent)) throw new VcsError(`ファイル/ディレクトリが衝突するTree: ${parent} と ${file}`);

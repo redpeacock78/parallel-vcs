@@ -266,7 +266,31 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
     const report = cmdWithOptions(d, { timeout: 3000 }, "verify");
     assert.equal(report.error, undefined);
     assert.equal(report.code, 1);
-    assert.match(report.err, /invalid tree path/);
+    for (const invalidPath of ["/bad", "bad\0path", "a\\..\\..\\outside"]) {
+      assert.ok(
+        report.err.includes(JSON.stringify(invalidPath)),
+        `missing invalid-path diagnostic for ${JSON.stringify(invalidPath)}`,
+      );
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("shotがPOSIX上のbackslash名を拒否してverifyと書き込み規則を揃える", t => {
+  if (process.platform === "win32") {
+    t.skip("Windows does not allow backslashes in file names");
+    return;
+  }
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "a\\b", "content");
+    assert.match(ok(d, "status"), /\? a\\b/);
+    const report = cmd(d, "shot", "-A");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /Tree pathが無効/);
+    assert.match(ok(d, "verify"), /^Verified \d+ objects/);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
