@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -18,14 +20,20 @@ import { fileURLToPath } from "node:url";
 
 const script = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const mkdirTemp = () => mkdtempSync(path.join(tmpdir(), "pvc-test-"));
-function cmd(cwd, ...args) {
+function runCommand(cwd, args, options = {}) {
   const cp = spawnSync(process.execPath, [
     "--disable-warning=ExperimentalWarning",
     "--experimental-strip-types",
     script,
     ...args,
-  ], { cwd, encoding: "utf8" });
-  return { code: cp.status, out: cp.stdout, err: cp.stderr };
+  ], { cwd, encoding: "utf8", ...options });
+  return { code: cp.status, out: cp.stdout || "", err: cp.stderr || "", error: cp.error };
+}
+function cmd(cwd, ...args) {
+  return runCommand(cwd, args);
+}
+function cmdWithOptions(cwd, options, ...args) {
+  return runCommand(cwd, args, options);
 }
 function ok(cwd, ...args) {
   const result = cmd(cwd, ...args);
@@ -41,6 +49,7 @@ const blobHash = (data) =>
   createHash("sha256").update(JSON.stringify({ kind: "blob", data: Buffer.from(data).toString("base64") })).digest(
     "hex",
   );
+const objectHash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 test("独立S0・Shot・任意Snapshot派生・過去地点の参照", () => {
   const d = mkdirTemp();
@@ -200,6 +209,244 @@ test("特殊なファイル名とCAS破損検出", () => {
     const cas = path.join(d, ".pvc", "objects", snap.id.slice(0, 2), snap.id.slice(2));
     writeFileSync(cas, "{\"kind\":\"snapshot\",\"corrupt\":true}");
     assert.equal(cmd(d, "show", "HEAD").code, 1);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyが正常なobject storeを受け入れ、hash破損を検出する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "file", "content");
+    ok(d, "shot", "file");
+    assert.match(ok(d, "verify"), /^Verified \d+ objects/);
+
+    const snapshot = JSON.parse(ok(d, "show", "HEAD"));
+    const treePath = path.join(d, ".pvc", "objects", snapshot.root.slice(0, 2), snapshot.root.slice(2));
+    writeFileSync(treePath, JSON.stringify({ kind: "tree", files: {} }));
+    const report = cmd(d, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /CAS hash mismatch/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyがCAS objectの欠落参照を検出する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const tree = { kind: "tree", files: { ghost: "f".repeat(64) } };
+    const id = objectHash(tree);
+    const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+    mkdirSync(path.dirname(objectPath), { recursive: true });
+    writeFileSync(objectPath, JSON.stringify(tree));
+
+    const report = cmd(d, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /referenced blob .* is missing or has the wrong type/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを終了せず拒否する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const invalidPaths = [
+      "/bad",
+      "bad\0path",
+      "a\\..\\..\\outside",
+      "C:foo",
+      "dir/C:foo",
+      "dir/file:stream",
+      "dir/CON.txt",
+      "dir/COM¹.log",
+      "dir/trailing.",
+      "dir/trailing ",
+      ".PVC/state.json",
+      "Node_Modules/package.json",
+      "a".repeat(256),
+    ];
+    for (const invalidPath of invalidPaths) {
+      const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };
+      const id = objectHash(tree);
+      const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+      mkdirSync(path.dirname(objectPath), { recursive: true });
+      writeFileSync(objectPath, JSON.stringify(tree));
+    }
+
+    const report = cmdWithOptions(d, { timeout: 3000 }, "verify");
+    assert.equal(report.error, undefined);
+    assert.equal(report.code, 1);
+    for (const invalidPath of invalidPaths) {
+      assert.ok(
+        report.err.includes(JSON.stringify(invalidPath)),
+        `missing invalid-path diagnostic for ${JSON.stringify(invalidPath)}`,
+      );
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyとshotはcase-insensitiveなTree path衝突を拒否する", t => {
+  const cases = [
+    {
+      files: { foo: "f".repeat(64), FOO: "e".repeat(64) },
+      diagnostic: /case-insensitive path collision between foo and FOO/,
+    },
+    {
+      files: { foo: "f".repeat(64), "FOO/bar": "e".repeat(64) },
+      diagnostic: /file\/directory collision between foo and FOO\/bar/,
+    },
+    {
+      files: { S: "f".repeat(64), "ſ": "e".repeat(64) },
+      diagnostic: /case-insensitive path collision between S and ſ/,
+    },
+  ];
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    for (const { files, diagnostic } of cases) {
+      const tree = { kind: "tree", files };
+      const id = objectHash(tree);
+      const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+      mkdirSync(path.dirname(objectPath), { recursive: true });
+      writeFileSync(objectPath, JSON.stringify(tree));
+
+      const report = cmd(d, "verify");
+      assert.equal(report.code, 1);
+      assert.match(report.err, diagnostic);
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+
+  if (process.platform === "win32") {
+    t.skip("Case-distinct filesystem entries are required to test portable path collisions");
+    return;
+  }
+  for (const entries of [["foo", "FOO"], ["foo", "FOO/bar"], ["S", "ſ"]]) {
+    const repo = mkdirTemp();
+    try {
+      ok(repo, "init");
+      for (const [index, file] of entries.entries()) write(repo, file, `content ${index}`);
+      const shot = cmd(repo, "shot", "-A");
+      assert.equal(shot.code, 1);
+      assert.match(shot.err, /Tree内でpathが衝突する/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }
+});
+
+test("supplementary-plane case pairは別のTree pathとして扱う", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "𐐀", "capital");
+    write(d, "𐐨", "small");
+    assert.match(ok(d, "shot", "-A"), /Snapshot/);
+    assert.match(ok(d, "verify"), /^Verified \d+ objects/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("walkは除外directoryをcase-insensitiveに無視する", t => {
+  if (process.platform === "win32") {
+    t.skip("Case-distinct directory names are required for this POSIX regression test");
+    return;
+  }
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, ".PVC/state-copy.json", "ignored");
+    write(d, "Node_Modules/package.json", "ignored");
+    assert.match(ok(d, "status"), /^Parallel: main .*\nclean/m);
+    assert.match(ok(d, "shot", "-A"), /差分なし/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("shotがPOSIX上のbackslash名を拒否してverifyと書き込み規則を揃える", t => {
+  if (process.platform === "win32") {
+    t.skip("Windows does not allow backslashes in file names");
+    return;
+  }
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "a\\b", "content");
+    assert.match(ok(d, "status"), /\? a\\b/);
+    const report = cmd(d, "shot", "-A");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /Tree pathが無効/);
+    assert.match(ok(d, "verify"), /^Verified \d+ objects/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyが読み取れないobject bucketを報告する", t => {
+  if (process.platform === "win32" || typeof process.getuid !== "function") {
+    t.skip("POSIX permissions are required");
+    return;
+  }
+  const childUser = process.getuid() === 0 ? { uid: 65534, gid: 65534 } : {};
+  const d = mkdirTemp();
+  let bucketPath;
+  let metaPath;
+  try {
+    ok(d, "init");
+    const objects = path.join(d, ".pvc", "objects");
+    metaPath = path.join(d, ".pvc");
+    const bucket = readdirSync(objects).find(name => /^[a-f0-9]{2}$/.test(name));
+    assert.ok(bucket);
+    bucketPath = path.join(objects, bucket);
+    chmodSync(d, 0o755);
+    chmodSync(metaPath, 0o555);
+    chmodSync(objects, 0o755);
+    const accessProbe = cmdWithOptions(d, childUser, "verify");
+    const scriptInaccessible = accessProbe.err.includes("MODULE_NOT_FOUND") && accessProbe.err.includes(script);
+    if (
+      accessProbe.error?.code === "EACCES" || /EACCES|permission denied/i.test(accessProbe.err)
+      || scriptInaccessible
+    ) {
+      t.skip("pvc script or Node is not accessible to the unprivileged child");
+      return;
+    }
+    assert.equal(accessProbe.code, 0, `access probe: ${accessProbe.err} ${accessProbe.out}`);
+    chmodSync(bucketPath, 0);
+
+    const report = cmdWithOptions(d, childUser, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /cannot enumerate object bucket/);
+    assert.match(report.err, /検証失敗:/);
+    assert.doesNotMatch(report.err, /^\s+at .*\.ts:/m);
+  } finally {
+    if (bucketPath) chmodSync(bucketPath, 0o755);
+    if (metaPath) chmodSync(metaPath, 0o755);
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("verifyがstateのHEAD参照を確認する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const statePath = path.join(d, ".pvc", "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.heads.main = "f".repeat(64);
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const report = cmd(d, "verify");
+    assert.equal(report.code, 1);
+    assert.match(report.err, /state\.json head main: referenced snapshot .* is missing or has the wrong type/);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }

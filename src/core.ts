@@ -60,6 +60,7 @@ export type Composition = {
 const metaDir = ".pvc";
 const hexRe = /^[a-f0-9]{64}$/;
 const nameRe = /^[a-zA-Z][a-zA-Z0-9._-]*$/;
+const windowsReservedNameRe = /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
 const ignored = new Set([".pvc", ".git", "node_modules"]);
 
 export class VcsError extends Error {
@@ -84,6 +85,52 @@ function same(a: Hash | undefined, b: Hash | undefined): boolean {
 }
 function exists(file: string): boolean {
   return fs.existsSync(file);
+}
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isValidTreePath(filePath: string): boolean {
+  const parts = filePath.split("/");
+  return Boolean(filePath) && filePath !== "."
+    && !path.posix.isAbsolute(filePath) && !path.win32.isAbsolute(filePath)
+    && path.win32.parse(filePath).root === ""
+    && !filePath.includes("\0") && !filePath.includes("\\")
+    && path.posix.normalize(filePath) === filePath
+    && !parts.some(part => {
+      const deviceName = part.split(".", 1)[0].replace(/[ .]+$/g, "");
+      return !part || part.length > 255 || part === "." || part === ".." || ignored.has(part.toLowerCase())
+        || /[<>:"|?*\u0000-\u001f]/.test(part) || /[. ]$/.test(part)
+        || windowsReservedNameRe.test(deviceName);
+    });
+}
+function windowsCaseKey(value: string): string {
+  let key = "";
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
+    const uppercase = character.toUpperCase();
+    key += uppercase.length === 1 ? uppercase : character;
+  }
+  return key;
+}
+function treePathCollisions(filePaths: Iterable<string>): string[] {
+  const byCaseFoldedPath = new Map<string, string>();
+  const collisions: string[] = [];
+  for (const filePath of filePaths) {
+    if (!isValidTreePath(filePath)) continue;
+    const key = windowsCaseKey(filePath);
+    const previous = byCaseFoldedPath.get(key);
+    if (previous) collisions.push(`case-insensitive path collision between ${previous} and ${filePath}`);
+    else byCaseFoldedPath.set(key, filePath);
+  }
+  for (const filePath of byCaseFoldedPath.values()) {
+    let parent = path.posix.dirname(filePath);
+    while (parent !== "." && parent !== "/") {
+      const parentFile = byCaseFoldedPath.get(windowsCaseKey(parent));
+      if (parentFile) collisions.push(`file/directory collision between ${parentFile} and ${filePath}`);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  return collisions;
 }
 function lstatMaybe(file: string): fs.Stats | null {
   try {
@@ -382,7 +429,15 @@ export class Repo {
     const filename = this.objectPath(id);
     if (!exists(filename)) {
       fs.mkdirSync(path.dirname(filename), { recursive: true });
-      fs.writeFileSync(filename, bytes, { flag: "wx" });
+      const temporaryDirectory = path.join(this.meta, "object-temp");
+      fs.mkdirSync(temporaryDirectory, { recursive: true });
+      const temporary = path.join(temporaryDirectory, `${process.pid}-${randomUUID()}.tmp`);
+      try {
+        fs.writeFileSync(temporary, bytes, { flag: "wx" });
+        if (!exists(filename)) fs.renameSync(temporary, filename);
+      } finally {
+        if (exists(temporary)) fs.rmSync(temporary, { force: true });
+      }
     }
     return id;
   }
@@ -398,6 +453,243 @@ export class Repo {
     if (!["blob", "tree", "snapshot"].includes(obj.kind)) throw new VcsError("不明なCASオブジェクト");
     return obj;
   }
+  verify(): { objectCount: number; errors: string[] } {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (this.verificationHasActiveTransaction()) {
+        return { objectCount: 0, errors: ["repository is being updated; retry verification"] };
+      }
+      const before = this.readStateForVerification();
+      const report = this.verifyUnlocked();
+      if (this.verificationHasActiveTransaction()) {
+        return { ...report, errors: [...report.errors, "repository is being updated; retry verification"] };
+      }
+      const after = this.readStateForVerification();
+      if (this.sameStateForVerification(before, after)) return report;
+      if (attempt === 1) {
+        return { ...report, errors: [...report.errors, "repository changed during verification; please retry"] };
+      }
+    }
+    return { objectCount: 0, errors: ["repository changed during verification; please retry"] };
+  }
+  private verificationHasActiveTransaction(): boolean {
+    try {
+      return lstatMaybe(this.transactionDirectory()) !== null;
+    } catch {
+      return true;
+    }
+  }
+  private readStateForVerification(): { bytes: Buffer | null; error: string | null } {
+    try {
+      return { bytes: fs.readFileSync(path.join(this.meta, "state.json")), error: null };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return { bytes: null, error: code || String(error) };
+    }
+  }
+  private sameStateForVerification(
+    left: { bytes: Buffer | null; error: string | null },
+    right: { bytes: Buffer | null; error: string | null },
+  ): boolean {
+    if (left.error !== right.error) return false;
+    if (left.bytes === null || right.bytes === null) return left.bytes === right.bytes;
+    return left.bytes.equals(right.bytes);
+  }
+  private verifyUnlocked(): { objectCount: number; errors: string[] } {
+    const errors: string[] = [];
+    const objects = new Map<Hash, ObjectValue>();
+    const types = new Map<Hash, ObjectValue["kind"]>();
+    let objectCount = 0;
+    const objectDirectory = path.join(this.meta, "objects");
+    let directoryStat: fs.Stats | null = null;
+    let directoryStatFailed = false;
+    try {
+      directoryStat = lstatMaybe(objectDirectory);
+    } catch (error) {
+      directoryStatFailed = true;
+      errors.push(`.pvc/objects: cannot inspect CAS object directory (${String(error)})`);
+    }
+    if (!directoryStatFailed && (!directoryStat || !directoryStat.isDirectory() || directoryStat.isSymbolicLink())) {
+      errors.push(".pvc/objects: CAS object directory is missing or invalid");
+    } else if (directoryStat) {
+      let buckets: fs.Dirent[] = [];
+      try {
+        buckets = fs.readdirSync(objectDirectory, { withFileTypes: true });
+      } catch (error) {
+        errors.push(`.pvc/objects: cannot enumerate object buckets (${String(error)})`);
+      }
+      for (const bucket of buckets) {
+        const bucketPath = path.join(objectDirectory, bucket.name);
+        if (
+          !bucket.isDirectory() || bucket.isSymbolicLink() || bucket.name.length !== 2
+          || !/^[a-f0-9]{2}$/.test(bucket.name)
+        ) {
+          errors.push(`${path.relative(this.meta, bucketPath)}: invalid object bucket`);
+          continue;
+        }
+        let files: fs.Dirent[];
+        try {
+          files = fs.readdirSync(bucketPath, { withFileTypes: true });
+        } catch (error) {
+          errors.push(`${path.relative(this.meta, bucketPath)}: cannot enumerate object bucket (${String(error)})`);
+          continue;
+        }
+        for (const file of files) {
+          const filePath = path.join(bucketPath, file.name);
+          const relativePath = path.relative(this.meta, filePath).split(path.sep).join("/");
+          if (!file.isFile() || file.isSymbolicLink() || file.name.length !== 62 || !/^[a-f0-9]{62}$/.test(file.name)) {
+            errors.push(`${relativePath}: invalid object entry`);
+            continue;
+          }
+          objectCount++;
+          const id = bucket.name + file.name;
+          let bytes: Buffer;
+          try {
+            bytes = fs.readFileSync(filePath);
+          } catch (error) {
+            errors.push(`${relativePath}: cannot read object (${String(error)})`);
+            continue;
+          }
+          if (hashBytes(bytes) !== id) {
+            errors.push(`${relativePath}: CAS hash mismatch`);
+            continue;
+          }
+          let value: unknown;
+          try {
+            value = JSON.parse(bytes.toString("utf8"));
+          } catch (error) {
+            errors.push(`${relativePath}: invalid JSON (${String(error)})`);
+            continue;
+          }
+          if (!isRecord(value) || !["blob", "tree", "snapshot"].includes(String(value.kind))) {
+            errors.push(`${relativePath}: unknown CAS object format`);
+            continue;
+          }
+
+          if (value.kind === "blob") {
+            if (
+              typeof value.data !== "string"
+              || Buffer.from(value.data, "base64").toString("base64") !== value.data
+            ) {
+              errors.push(`${relativePath}: invalid blob data`);
+              continue;
+            }
+            objects.set(id, value as unknown as BlobObject);
+            types.set(id, "blob");
+          } else if (value.kind === "tree") {
+            if (!isRecord(value.files)) {
+              errors.push(`${relativePath}: tree files must be an object`);
+              continue;
+            }
+            let valid = true;
+            for (const [filePath, blobId] of Object.entries(value.files)) {
+              if (!isValidTreePath(filePath)) {
+                errors.push(`${relativePath}: invalid tree path ${JSON.stringify(filePath)}`);
+                valid = false;
+              }
+              if (typeof blobId !== "string" || !hexRe.test(blobId)) {
+                errors.push(`${relativePath}: invalid blob reference for ${JSON.stringify(filePath)}`);
+                valid = false;
+              }
+            }
+            for (const collision of treePathCollisions(Object.keys(value.files))) {
+              errors.push(`${relativePath}: ${collision}`);
+              valid = false;
+            }
+            if (!valid) continue;
+            objects.set(id, value as unknown as TreeObject);
+            types.set(id, "tree");
+          } else {
+            if (
+              typeof value.parallel !== "string" || !nameRe.test(value.parallel) || value.parallel.includes("@")
+              || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0
+              || typeof value.root !== "string" || !hexRe.test(value.root)
+              || !Array.isArray(value.parents) || value.parents.length > 2
+              || value.parents.some(parent => typeof parent !== "string" || !hexRe.test(parent))
+              || !(value.seed === null || (typeof value.seed === "string" && hexRe.test(value.seed)))
+              || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))
+            ) {
+              errors.push(`${relativePath}: invalid snapshot format`);
+              continue;
+            }
+            objects.set(id, value as unknown as Snapshot);
+            types.set(id, "snapshot");
+          }
+        }
+      }
+    }
+
+    const requireType = (id: string, type: ObjectValue["kind"], location: string): ObjectValue | undefined => {
+      if (types.get(id) !== type) {
+        errors.push(`${location}: referenced ${type} ${short(id)} is missing or has the wrong type`);
+        return undefined;
+      }
+      return objects.get(id);
+    };
+    for (const [id, object] of objects) {
+      if (object.kind === "tree") {
+        for (const [filePath, blobId] of Object.entries(object.files)) {
+          requireType(blobId, "blob", `tree ${short(id)} (${filePath})`);
+        }
+      } else if (object.kind === "snapshot") {
+        requireType(object.root, "tree", `snapshot ${short(id)} root`);
+        for (const [index, parentId] of object.parents.entries()) {
+          requireType(parentId, "snapshot", `snapshot ${short(id)} parent ${index + 1}`);
+        }
+        if (object.seed) requireType(object.seed, "snapshot", `snapshot ${short(id)} seed`);
+
+        if (!object.parents.length) {
+          if (object.seq !== 0) errors.push(`snapshot ${short(id)}: parentless snapshot must have seq 0`);
+          if (object.seed) {
+            const seed = objects.get(object.seed);
+            if (seed?.kind === "snapshot" && seed.root !== object.root) {
+              errors.push(`snapshot ${short(id)}: seed and snapshot trees differ`);
+            }
+          }
+        } else {
+          if (object.seed !== null) errors.push(`snapshot ${short(id)}: only a parentless snapshot can have a seed`);
+          const parent = objects.get(object.parents[0]);
+          if (parent?.kind === "snapshot") {
+            if (parent.parallel !== object.parallel) {
+              errors.push(`snapshot ${short(id)}: first parent belongs to another Parallel`);
+            }
+            if (parent.seq + 1 !== object.seq) {
+              errors.push(`snapshot ${short(id)}: sequence does not follow its first parent`);
+            }
+          }
+          if (object.parents.length === 2 && object.parents[0] === object.parents[1]) {
+            errors.push(`snapshot ${short(id)}: duplicate parents`);
+          }
+        }
+      }
+    }
+
+    let state: unknown;
+    try {
+      state = JSON.parse(fs.readFileSync(path.join(this.meta, "state.json"), "utf8"));
+    } catch (error) {
+      errors.push(`.pvc/state.json: cannot read state (${String(error)})`);
+      return { objectCount, errors };
+    }
+    if (
+      !isRecord(state) || state.format !== 1 || typeof state.active !== "string"
+      || !isRecord(state.heads) || !nameRe.test(state.active) || state.active.includes("@")
+      || !Object.hasOwn(state.heads, state.active)
+    ) {
+      errors.push(".pvc/state.json: invalid state format");
+      return { objectCount, errors };
+    }
+    for (const [name, id] of Object.entries(state.heads)) {
+      if (!nameRe.test(name) || name.includes("@") || typeof id !== "string" || !hexRe.test(id)) {
+        errors.push(`.pvc/state.json: invalid head entry ${JSON.stringify(name)}`);
+        continue;
+      }
+      const head = requireType(id, "snapshot", `.pvc/state.json head ${name}`);
+      if (head?.kind === "snapshot" && head.parallel !== name) {
+        errors.push(`.pvc/state.json: head ${name} points to Parallel ${head.parallel}`);
+      }
+    }
+    return { objectCount, errors };
+  }
   blob(bytes: Uint8Array): Hash {
     return this.put({ kind: "blob", data: Buffer.from(bytes).toString("base64") });
   }
@@ -407,6 +699,7 @@ export class Repo {
     return Buffer.from(obj.data, "base64");
   }
   writeTree(files: Tree): Hash {
+    this.assertValidTree(files);
     return this.put({ kind: "tree", files: sortedTree(files) });
   }
   readTree(id: Hash): Tree {
@@ -490,12 +783,13 @@ export class Repo {
 
   // Root-relative POSIX paths only. Never trust a user-supplied absolute/parent path.
   normalize(input: string): string {
+    if (input.includes("\0")) throw new VcsError(`NUL byteを含むパスは使えない: ${input}`);
     const target = path.resolve(this.root, input);
     const rel = path.relative(this.root, target).split(path.sep).join("/");
     if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) {
       throw new VcsError(`パスがリポジトリ外: ${input}`);
     }
-    if (rel.split("/").some(p => ignored.has(p))) throw new VcsError(`除外されたパス: ${input}`);
+    if (rel.split("/").some(p => ignored.has(p.toLowerCase()))) throw new VcsError(`除外されたパス: ${input}`);
     return rel || ".";
   }
   private safeFile(relative: string): string {
@@ -516,7 +810,7 @@ export class Repo {
     if (!fs.statSync(absolute).isDirectory()) return [];
     const out: string[] = [];
     for (const name of fs.readdirSync(absolute).sort()) {
-      if (ignored.has(name)) continue;
+      if (ignored.has(name.toLowerCase())) continue;
       const child = relative === "." ? name : `${relative}/${name}`;
       out.push(...this.walk(child));
     }
@@ -620,12 +914,10 @@ export class Repo {
   private assertValidTree(tree: Tree): void {
     const files = new Set(Object.keys(tree));
     for (const file of files) {
-      let parent = path.posix.dirname(file);
-      while (parent !== ".") {
-        if (files.has(parent)) throw new VcsError(`ファイル/ディレクトリが衝突するTree: ${parent} と ${file}`);
-        parent = path.posix.dirname(parent);
-      }
+      if (!isValidTreePath(file)) throw new VcsError(`Tree pathが無効: ${JSON.stringify(file)}`);
     }
+    const collisions = treePathCollisions(files);
+    if (collisions.length) throw new VcsError(`Tree内でpathが衝突する: ${collisions.join("; ")}`);
   }
   private pruneEmptyParents(paths: string[]): void {
     const directories = new Set<string>();
