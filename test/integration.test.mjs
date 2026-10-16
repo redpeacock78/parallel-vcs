@@ -266,6 +266,8 @@ test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを
       "dir/COM¹.log",
       "dir/trailing.",
       "dir/trailing ",
+      ".PVC/state.json",
+      "Node_Modules/package.json",
     ];
     for (const invalidPath of invalidPaths) {
       const tree = { kind: "tree", files: { [invalidPath]: "f".repeat(64) } };

@@ -98,7 +98,7 @@ function isValidTreePath(filePath: string): boolean {
     && path.posix.normalize(filePath) === filePath
     && !parts.some(part => {
       const deviceName = part.split(".", 1)[0].replace(/[ .]+$/g, "");
-      return !part || part === "." || part === ".." || ignored.has(part)
+      return !part || part === "." || part === ".." || ignored.has(part.toLowerCase())
         || /[<>:"|?*\u0000-\u001f]/.test(part) || /[. ]$/.test(part)
         || windowsReservedNameRe.test(deviceName);
     });
@@ -770,7 +770,7 @@ export class Repo {
     if (rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) {
       throw new VcsError(`パスがリポジトリ外: ${input}`);
     }
-    if (rel.split("/").some(p => ignored.has(p))) throw new VcsError(`除外されたパス: ${input}`);
+    if (rel.split("/").some(p => ignored.has(p.toLowerCase()))) throw new VcsError(`除外されたパス: ${input}`);
     return rel || ".";
   }
   private safeFile(relative: string): string {
