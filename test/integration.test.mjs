@@ -251,6 +251,70 @@ test("verifyがCAS objectの欠落参照を検出する", () => {
   }
 });
 
+test("gcは全Parallelの履歴を残し、到達不能なCAS objectを削除する", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    write(d, "tracked.txt", "reachable");
+    ok(d, "shot", "tracked.txt");
+    ok(d, "parallel", "fork", "alt");
+
+    const orphanBlob = { kind: "blob", data: Buffer.from("orphan").toString("base64") };
+    const orphanBlobId = objectHash(orphanBlob);
+    const orphanTree = { kind: "tree", files: { "orphan.txt": orphanBlobId } };
+    const orphanTreeId = objectHash(orphanTree);
+    const orphanSnapshot = {
+      kind: "snapshot",
+      parallel: "orphan",
+      seq: 0,
+      root: orphanTreeId,
+      parents: [],
+      seed: null,
+      createdAt: new Date().toISOString(),
+    };
+    const orphanSnapshotId = objectHash(orphanSnapshot);
+    for (
+      const [id, object] of [
+        [orphanBlobId, orphanBlob],
+        [orphanTreeId, orphanTree],
+        [orphanSnapshotId, orphanSnapshot],
+      ]
+    ) {
+      const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+      mkdirSync(path.dirname(objectPath), { recursive: true });
+      writeFileSync(objectPath, JSON.stringify(object));
+    }
+
+    assert.match(ok(d, "verify"), /^Verified 9 objects/);
+    assert.match(ok(d, "gc", "--dry-run"), /Would remove 3 unreachable objects/);
+    assert.match(ok(d, "verify"), /^Verified 9 objects/);
+    assert.match(ok(d, "gc"), /Removed 3 unreachable objects/);
+    assert.match(ok(d, "verify"), /^Verified 6 objects/);
+    assert.match(ok(d, "show", "main@0"), /"seq": 0/);
+    assert.match(ok(d, "show", "alt@0"), /"seq": 0/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("gcは破損したobject storeを変更しない", () => {
+  const d = mkdirTemp();
+  try {
+    ok(d, "init");
+    const id = "a".repeat(64);
+    const objectPath = path.join(d, ".pvc", "objects", id.slice(0, 2), id.slice(2));
+    mkdirSync(path.dirname(objectPath), { recursive: true });
+    writeFileSync(objectPath, JSON.stringify({ kind: "blob", data: "corrupt" }));
+
+    const result = cmd(d, "gc");
+    assert.equal(result.code, 1);
+    assert.match(result.err, /CAS検証に失敗したためGCを中止/);
+    assert.ok(existsSync(objectPath));
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("verifyが絶対path、NUL byte、Windows形式の区切りを含むTreeを終了せず拒否する", () => {
   const d = mkdirTemp();
   try {
